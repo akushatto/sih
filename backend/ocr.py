@@ -45,32 +45,40 @@ def preprocess(img_bgr: np.ndarray, deskew: bool = False, max_side: int = 1600):
 
     if deskew:
         a = _skew_angle(img_bgr)
-        if 0.5 < abs(a) < 15:
+        if 3.0 <= abs(a) <= 15:
             img_bgr = _rotate(img_bgr, a)
 
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     gray = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
-    gray = cv2.bilateralFilter(gray, 5, 40, 40)  # light denoise (fast enough for live mode)
     return img_bgr, gray
 
 
 # ---------------- OCR ----------------
 def ocr_lines(gray: np.ndarray, lang: str = "eng+hin"):
     """Word-level OCR grouped into lines with bounding boxes + mean confidence.
-    Includes adaptive segmentation: falls back to PSM 11 (sparse packaging layout) if PSM 6 finds insufficient text.
+    Includes adaptive segmentation: falls back to PSM 1 (OSD), PSM 11 (sparse text),
+    or PSM 12 if standard PSM yields insufficient text.
     """
-    d = pytesseract.image_to_data(gray, lang=lang, config=f"--oem 3 --psm {PSM}", output_type=Output.DICT)
+    # Alphanumeric packaging declarations (MRP, batch, FSSAI, PWM, net qty) are Latin/ASCII;
+    # prioritizing 'eng' prevents Tesseract from corrupting numerals into Hindi conjuncts.
+    primary_lang = "eng" if ("eng" in lang and "hin" in lang) else lang
+    d = pytesseract.image_to_data(gray, lang=primary_lang, config=f"--oem 3 --psm {PSM}", output_type=Output.DICT)
 
-    # Check if PSM 6 yielded enough high-confidence text; if not (sparse/irregular packaging layout), fallback to PSM 11
-    valid_words = [t for t, c in zip(d.get("text", []), d.get("conf", [])) if t and t.strip() and float(c) > 35]
-    if len(valid_words) < 4:
-        try:
-            d_fallback = pytesseract.image_to_data(gray, lang=lang, config="--oem 3 --psm 11", output_type=Output.DICT)
-            fb_words = [t for t, c in zip(d_fallback.get("text", []), d_fallback.get("conf", [])) if t and t.strip() and float(c) > 35]
-            if len(fb_words) > len(valid_words):
-                d = d_fallback
-        except Exception:
-            pass
+    # Check if standard PSM yielded enough high-confidence text; if not (sparse/irregular/oriented packaging layout),
+    # fall back to PSM 1 (Orientation & Script Detection), PSM 11 (sparse text), or PSM 12
+    valid_words = [t for t, c in zip(d.get("text", []), d.get("conf", [])) if t and t.strip() and float(c) > 30]
+    if len(valid_words) < 5:
+        for fb_psm in ["1", "11", "12"]:
+            try:
+                d_fallback = pytesseract.image_to_data(gray, lang=primary_lang, config=f"--oem 3 --psm {fb_psm}", output_type=Output.DICT)
+                fb_words = [t for t, c in zip(d_fallback.get("text", []), d_fallback.get("conf", [])) if t and t.strip() and float(c) > 30]
+                if len(fb_words) > len(valid_words):
+                    d = d_fallback
+                    valid_words = fb_words
+                    if len(valid_words) >= 6:
+                        break
+            except Exception:
+                pass
 
     lines = {}
     for i, txt in enumerate(d["text"]):
@@ -180,7 +188,7 @@ def detect_qr(img_bgr: np.ndarray) -> list[dict]:
 
     # 5. Multi-angle Barcode / QR search (crucial for cylindrical bottles, cans, tubes where codes run vertically)
     if not results and _barcode_detector is not None:
-        for rot_flag in [cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE]:
+        for rot_flag in [cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_180, cv2.ROTATE_90_COUNTERCLOCKWISE]:
             try:
                 r_img = cv2.rotate(img_bgr, rot_flag)
                 retval, b_info, b_type, b_pts = _barcode_detector.detectAndDecodeMulti(r_img)

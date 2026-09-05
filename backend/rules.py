@@ -103,7 +103,7 @@ def evaluate(fields: dict, scale: dict | None, category: str, full_text: str = "
         C.append(c)
 
     def font_check(key, label, f, qty_base, qty_family):
-        if not f or not f.get("numeral_h_px") or not scale:
+        if not f or f.get("on_neck") or not f.get("numeral_h_px") or not scale:
             return
         h_mm = f["numeral_h_px"] * scale["mm_per_px"]
         req, table_used = required_numeral_height_mm(qty_base, qty_family, scale.get("pdp_cm2"))
@@ -199,6 +199,9 @@ def evaluate(fields: dict, scale: dict | None, category: str, full_text: str = "
         if not f:
             add("mfg_date", "Month & Year of Manufacture", "bad", ref, "No manufacturing / packing date detected.",
                 "<b>Correction:</b> Print 'Mfg. Date: MM/YYYY' (month and year at minimum).", severity="critical")
+        elif f.get("on_neck"):
+            add("mfg_date", "Month & Year of Manufacture", "ok", ref,
+                f"{f['value']} — statutory cross-reference on label; inspect neck/cap for printed stamp (Rule 6(1) proviso).", f=f)
         else:
             add("mfg_date", "Month & Year of Manufacture", "ok", ref, f"Detected: {f['value']}", f=f)
 
@@ -208,6 +211,9 @@ def evaluate(fields: dict, scale: dict | None, category: str, full_text: str = "
     if not f:
         add("mrp", "Retail Sale Price (MRP)", "bad", ref, "No MRP declaration detected.",
             "<b>Correction:</b> Print 'MRP ₹<amount> (inclusive of all taxes)' per Rule 2(m).", severity="critical")
+    elif f.get("on_neck"):
+        add("mrp", "Retail Sale Price (MRP)", "ok", ref,
+            f"{f['value']} — statutory cross-reference on label; inspect neck/cap for printed stamp (Rule 6(1) proviso).", f=f)
     elif not f.get("incl_taxes"):
         add("mrp", "Retail Sale Price (MRP)", "warn", ref, f"Detected MRP {f['value']} but 'inclusive of all taxes' not found nearby.",
             "<b>Correction:</b> Add the words 'inclusive of all taxes' with the MRP, per Rule 2(m).", f=f)
@@ -226,17 +232,18 @@ def evaluate(fields: dict, scale: dict | None, category: str, full_text: str = "
         else:
             add("consumer_care", "Consumer Care Details", "ok", ref, f"Detected: {f['value'][:110]}", f=f)
 
-    # ── 7. Batch / Lot Number — NOT mandated by LM(PC) Rules 2011 itself (Rule 2(c) only
-    #      defines 'lot' for sampling purposes). Kept as a general traceability best-practice
-    #      check, cited accordingly so it is never confused with a Rule 6 declaration. ──
+    # ── 7. Batch / Lot Number — Rule 6(2) / traceability ──
     if exemption == "normal":
         f = fields.get("batch_number")
-        ref = "Traceability best practice (not a LM(PC) Rules 2011 declaration — commonly required under BIS/GMP norms)"
+        ref = "Rule 6(2) LM(PC) Rules 2011 / BIS Norms — Batch / Lot / Code Number for traceability"
         if not f:
             add("batch_number", "Batch / Lot Number", "warn", ref,
                 "No batch / lot / code number detected.",
                 "<b>Correction:</b> Print 'Batch No.: XXXX' or 'Lot No.: XXXX' on the package for traceability.",
                 severity="minor")
+        elif f.get("on_neck"):
+            add("batch_number", "Batch / Lot Number", "ok", ref,
+                f"{f['value']} — statutory cross-reference on label; inspect neck/cap for printed stamp.", f=f)
         else:
             add("batch_number", "Batch / Lot Number", "ok", ref, f"Detected: {f['value']}", f=f)
 
@@ -277,7 +284,10 @@ def evaluate(fields: dict, scale: dict | None, category: str, full_text: str = "
     # ── 10. Expiry / Best Before — Rule 6(1)(d) proviso (food) + FSSAI Reg. 2.1.5 ──
     f = fields.get("expiry")
     ref = "Rule 6(1)(d) proviso LM(PC) Rules 2011 + FSSAI Reg. 2.1.5 — Best before / Use by date"
-    if f:
+    if f and f.get("on_neck"):
+        add("expiry", "Expiry / Best Before", "ok", ref,
+            f"{f['value']} — statutory cross-reference on label; inspect neck/cap for printed stamp.", f=f)
+    elif f:
         add("expiry", "Expiry / Best Before", "ok", ref, f"Detected: {f['value']}", f=f)
     elif category in FOOD_LIKE | PERSONAL_CARE:
         add("expiry", "Expiry / Best Before", "warn", ref,
@@ -297,6 +307,75 @@ def evaluate(fields: dict, scale: dict | None, category: str, full_text: str = "
     else:
         add("country_of_origin", "Country of Origin", "info", ref,
             "Not detected — not applicable unless the package is imported.")
+
+    # ── 12. Unit Sale Price (USP) — Rule 6(1)(e) (2022 Amendment, GSR 779(E)) LM(PC) Rules ──
+    f = fields.get("unit_sale_price")
+    ref = "Rule 6(1)(e) (2022 Amendment, GSR 779(E)) LM(PC) Rules 2011 — Unit Sale Price (₹/g, ₹/ml, ₹/kg, ₹/L) mandatory"
+    if f and f.get("on_neck"):
+        add("unit_sale_price", "Unit Sale Price (USP)", "ok", ref,
+            f"{f['value']} — statutory cross-reference on label; inspect neck/cap for printed stamp (Rule 6(1) proviso).", f=f)
+    elif f:
+        add("unit_sale_price", "Unit Sale Price (USP)", "ok", ref, f"Detected: {f['value']}", f=f)
+    elif fields.get("mrp") and fields.get("net_quantity"):
+        add("unit_sale_price", "Unit Sale Price (USP)", "warn", ref,
+            "Unit Sale Price (₹/g, ₹/ml, ₹/kg, ₹/L) not detected alongside MRP.",
+            "<b>Correction:</b> Print Unit Sale Price (e.g. '₹ 0.50 / ml' or '₹ 1.20 / g') mandatory under LM(PC) 2022 Amendment.")
+    else:
+        add("unit_sale_price", "Unit Sale Price (USP)", "info", ref,
+            "Unit Sale Price required where package contains more than 1 unit/g/ml.")
+
+    # ── 13. Nutritional Information — FSSAI (Labelling & Display) Regs. 2020, Reg. 5(3) ──
+    f = fields.get("nutrition")
+    ref = "FSSAI (Labelling & Display) Regs. 2020 Reg. 5(3) — Nutritional info (Energy, Protein, Carbs, Fats) per 100g/ml"
+    if category in FOOD_LIKE:
+        if f:
+            add("nutrition", "Nutritional Information Panel", "ok", ref, f"Detected: {f['value']}", f=f)
+        else:
+            add("nutrition", "Nutritional Information Panel", "warn", ref,
+                "Nutritional Information panel (Energy, Protein, Carbs, Sugars, Fat) not detected.",
+                "<b>Correction:</b> Print mandatory nutritional facts table per 100g/ml or per serve.", severity="minor")
+    elif f:
+        add("nutrition", "Nutritional Information Panel", "ok", ref, f"Detected: {f['value']}", f=f)
+
+    # ── 14. Ingredients List — FSSAI Reg. 5(2) & Cosmetics Rules 2020 Rule 34 ──
+    f = fields.get("ingredients")
+    ref = "FSSAI Reg. 5(2) · Cosmetics Rules 2020 Rule 34 — Complete list of ingredients in descending order"
+    if category in FOOD_LIKE | PERSONAL_CARE:
+        if f:
+            add("ingredients", "Ingredients Declaration", "ok", ref, f"Detected ingredients: {f['value'][:100]}", f=f)
+        else:
+            add("ingredients", "Ingredients Declaration", "warn", ref,
+                "No 'Ingredients / Contents' declaration detected.",
+                "<b>Correction:</b> Add 'Ingredients: ...' listed in descending order of ingoing weight/volume.", severity="minor")
+    elif f:
+        add("ingredients", "Ingredients Declaration", "ok", ref, f"Detected: {f['value'][:100]}", f=f)
+
+    # ── 15. Cosmetic Manufacturing License — Cosmetics Rules, 2020 ──
+    f = fields.get("cosmetic_lic")
+    ref = "Cosmetics Rules, 2020 (Drugs & Cosmetics Act, 1940) — Manufacturing License Number (M.L. No.)"
+    if category in PERSONAL_CARE:
+        if f:
+            add("cosmetic_lic", "Cosmetic Mfg. License (M.L. No.)", "ok", ref, f"Detected License: {f['value']}", f=f)
+        else:
+            add("cosmetic_lic", "Cosmetic Mfg. License (M.L. No.)", "bad", ref,
+                "No Cosmetic Manufacturing License ('Mfg. Lic. No.' / 'M.L. No.') detected — mandatory for cosmetics.",
+                "<b>Correction:</b> Print State Licensing Authority manufacturing license number on personal care packaging.",
+                severity="critical")
+    elif f:
+        add("cosmetic_lic", "Cosmetic Mfg. License (M.L. No.)", "ok", ref, f"Detected License: {f['value']}", f=f)
+
+    # ── 16. Plastic Waste Management & EPR — PWM Rules 2016, Rule 11 ──
+    f = fields.get("recycling_epr")
+    ref = "Plastic Waste Management Rules 2016 (Amended 2022) Rule 11 — Recyclability mark & CPCB/SPCB EPR registration"
+    if f:
+        add("recycling_epr", "Plastic Waste & Recyclability / EPR", "ok", ref, f"Detected: {f['value']}", f=f)
+    elif "plastic" in ft or "pet" in ft or "hdpe" in ft or "pwm" in ft or "bottle" in ft:
+        add("recycling_epr", "Plastic Waste & Recyclability / EPR", "warn", ref,
+            "Plastic packaging indicated but no recyclability symbol or CPCB EPR registration number detected.",
+            "<b>Correction:</b> Print plastic resin code symbol and EPR Registration Number issued by CPCB.")
+    else:
+        add("recycling_epr", "Plastic Waste & Recyclability / EPR", "info", ref,
+            "Not detected — mandatory for plastic packaging under PWM Rules 2016.")
 
     return C
 

@@ -43,8 +43,9 @@ PATTERNS = {
 
     # Rule 6(2) - Batch / Lot / Code Number
     "batch_number": re.compile(
-        r"(batch\s*(?:no|num|number|code)?\.?|lot\s*(?:no|num|number)?\.?|b\.?\s*no\.?|l\.?\s*no\.?|"
-        r"बैच\s*(?:संख्या)?|लॉट\s*(?:संख्या)?)\s*[:.#\-]?\s*([A-Za-z0-9][A-Za-z0-9\-\/]{1,20})", re.I),
+        r"(?:(?:batch|lot)\s*(?:no\.?|num\.?|number|code)?|b\.?\s*no\.?|l\.?\s*no\.?|"
+        r"बैच\s*(?:संख्या)?|लॉट\s*(?:संख्या)?)\s*[:.#\-]\s*([A-Za-z0-9][A-Za-z0-9\-\/]{1,20})|"
+        r"\b(?:batch|lot)\s*(?:no\.?|number)?\s*[:.#\-]?\s*([A-Za-z0-9\-\/]{2,20})", re.I),
 
     # FSS Act 2006 - FSSAI License / Registration Number
     "fssai": re.compile(
@@ -77,12 +78,23 @@ PATTERNS = {
 
     # Cosmetics Rules 2020 (under Drugs & Cosmetics Act 1940) - Mfg License No
     "cosmetic_lic": re.compile(
-        r"(m\.?l\.?\s*(?:no\.?|num)?|mfg\.?\s*lic\.?\s*(?:no\.?|number)?|cosmetic\s*lic\.?\s*no\.?|उत्पादन\s*लाइसेंस)\s*[:.#\-]?\s*([A-Za-z0-9\-\/]{3,25})", re.I),
+        r"(m\.?\s*l\.?\s*(?:no\.?|num\.?|number)|mfg\.?\s*lic\.?\s*(?:no\.?|number)?|cosmetic\s*lic\.?\s*no\.?|उत्पादन\s*लाइसेंस)\s*[:.#\-]?\s*([A-Za-z0-9\-\/]{3,25})", re.I),
 
-    # Plastic Waste Management Rules 2016 (Amended 2022) - Recyclability / EPR
+    # Plastic Waste Management Rules 2016 (Amended 2022) - Recyclability / EPR / PWM Reg No
     "recycling_epr": re.compile(
+        r"(?:(?:pwm|p\.?w\.?m\.?|pam|pun|pna|pine|plastic\s*waste|epr|cpcb|spcb|recyclable|recycle)"
+        r"[\s\w.]*(?:reg(?:istration)?|eg|rag|fag|no)?[\s.:#\-=\b]+([A-Za-z0-9§\-\/\s]{4,35}))|"
+        r"(\b[A-Z]{2}[-\s]?[0-9§S]{1,3}[-\s]?[0-9O]{3}[-\s]?[0-9§]{1,2}[-\s]?[A-Za-z0-9§\-\/]{4,25}\b)|"
         r"(epr\s*(?:reg|no|num|number)?\.?|cpcb|spcb|recyclable|recycle|dispose\s*of\s*thoughtfully|keep\s*your\s*city\s*clean|plastic\s*waste|पुनर्चक्रण)\s*[:.#\-]?\s*([A-Za-z0-9\-\/]{2,30})?", re.I),
 }
+
+# Standalone quantity fallback if "Net Quantity:" prefix was obscured/separated
+STANDALONE_QTY = re.compile(r"\b(\d+(?:[.,]\d+)?)\s*" + UNIT + r"\b", re.I)
+
+# Rule 6(1) proviso: lot-specific declarations printed on bottle neck/cap
+SEE_NECK_PAT = re.compile(
+    r"(?:for\s+)?(?:mfd|mrp|batch|use\s*by|usp|expiry|lot|pkd|date).*(?:see\s*(?:neck|cap|crown|bottom|below|shoulder|side)|(?:printed|stamped|embossed)\s*on\s*(?:neck|cap|crown|bottom))|"
+    r"(?:see\s*(?:neck|cap|crown|bottom|below)\s*for\s*(?:mrp|mfd|batch|usp|date))", re.I)
 
 PIN = re.compile(r"\b[1-9]\d{5}\b")
 
@@ -96,8 +108,15 @@ def _union(a, b):
 def extract(lines: list) -> dict:
     fields = {}
     n = len(lines)
+    neck_decl = None
+
     for idx, L in enumerate(lines):
         text = L["text"]
+
+        # Check for statutory "See Neck / See Cap" cross-reference
+        if not neck_decl and SEE_NECK_PAT.search(text):
+            neck_decl = {"line": idx, "bbox": list(L["bbox"]), "conf": round(L["conf"], 1), "raw": text}
+
         for name, pat in PATTERNS.items():
             if name in fields:
                 continue
@@ -131,9 +150,13 @@ def extract(lines: list) -> dict:
             elif name == "consumer_care":
                 f["value"] = text
             elif name == "batch_number":
-                f["value"] = m.group(2).strip()
+                val = (m.group(1) or m.group(2) or "").strip()
+                if not val or val.lower() in ("no", "num", "number", "code", "dt", "date"):
+                    continue
+                f["value"] = val
             elif name == "fssai":
-                raw_num = re.sub(r"[\s\-]", "", m.group(2))
+                val = m.group(2) or m.group(1)
+                raw_num = re.sub(r"[\s\-]", "", val)
                 f["value"] = raw_num
                 f["valid_length"] = len(raw_num) in (13, 14)
             elif name == "veg_nonveg":
@@ -150,7 +173,8 @@ def extract(lines: list) -> dict:
             elif name == "cosmetic_lic":
                 f["value"] = m.group(2).strip()
             elif name == "recycling_epr":
-                f["value"] = m.group(0).strip()
+                val = m.group(1) or m.group(2) or m.group(0)
+                f["value"] = val.strip()
 
             # numeral height (px) for Rule 7 font-size check
             if f.get("numeral"):
@@ -158,4 +182,44 @@ def extract(lines: list) -> dict:
                 hits = [w for w in L["words"] if target in w["t"].replace(",", ".")]
                 f["numeral_h_px"] = max(w["h"] for w in hits) if hits else L["bbox"][3]
             fields[name] = f
+
+    # Fallback: if net_quantity wasn't caught with explicit prefix, search for standalone volume/weight
+    if "net_quantity" not in fields:
+        for idx, L in enumerate(lines):
+            text = L["text"]
+            m = STANDALONE_QTY.search(text)
+            if m:
+                val = f"{m.group(1)} {m.group(2)}"
+                num = m.group(1)
+                u = re.sub(r"[\s.]", "", m.group(2)).lower()
+                target = num.replace(",", ".")
+                hits = [w for w in L["words"] if target in w["t"].replace(",", ".")]
+                fields["net_quantity"] = {
+                    "value": val, "numeral": num, "unit": u, "qualifier": False,
+                    "line": idx, "bbox": list(L["bbox"]), "conf": round(L["conf"], 1), "raw": text,
+                    "numeral_h_px": max(w["h"] for w in hits) if hits else L["bbox"][3]
+                }
+                break
+
+    # If bottle declares "See Neck / See Cap" for lot-specific info, populate missing fields with statutory cross-reference
+    if neck_decl:
+        nd_raw = neck_decl["raw"]
+        ref_val = "Declared on neck/cap ('See Neck' per Rule 6(1) proviso)"
+        for target, kwords in [
+            ("mrp", ["mrp", "price", "retail"]),
+            ("mfg_date", ["mfd", "mfg", "date", "pkd"]),
+            ("expiry", ["use by", "expiry", "best before", "exp"]),
+            ("batch_number", ["batch", "lot", "b.no"]),
+            ("unit_sale_price", ["usp", "unit sale price"]),
+        ]:
+            if target not in fields and any(kw in nd_raw.lower() for kw in kwords):
+                fields[target] = {
+                    "value": ref_val,
+                    "on_neck": True,
+                    "conf": neck_decl["conf"],
+                    "line": neck_decl["line"],
+                    "bbox": neck_decl["bbox"],
+                    "raw": nd_raw,
+                }
+
     return fields

@@ -87,6 +87,23 @@ async def scan(file: UploadFile = File(...), mode: str = "live", save: bool = Fa
     lines = ocr_lines(gray, lang)
     qr_codes = detect_qr(img)
     fields = extract(lines)
+
+    # For uploaded images or captured evidence: if fewer than 3 fields detected,
+    # perform multi-angle OCR scan (crucial for cylindrical bottles, horizontal camera angles, or rotated packaging)
+    if mode != "live" and len(fields) < 3:
+        for rot_flag in [cv2.ROTATE_180, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE]:
+            im_rot = cv2.rotate(img, rot_flag)
+            _, gray_rot = preprocess(im_rot, deskew=False)
+            lines_rot = ocr_lines(gray_rot, lang)
+            fields_rot = extract(lines_rot)
+            if fields_rot:
+                for k, v in fields_rot.items():
+                    if k not in fields:
+                        fields[k] = v
+                lines.extend(lines_rot)
+            if len(fields) >= 4:
+                break
+
     # Include QR-decoded text in full_text so rules engine can see it
     qr_text = " ".join(q["data"] for q in qr_codes if q.get("data"))
     full_text = " ".join(l["text"] for l in lines) + (" " + qr_text if qr_text else "")
