@@ -87,6 +87,30 @@ def ocr_lines(gray: np.ndarray, lang: str = "eng+hin"):
     return out
 
 
+# ---------------- QR Code Detection ----------------
+_qr_detector = cv2.QRCodeDetector()
+
+
+def detect_qr(img_bgr: np.ndarray) -> list[dict]:
+    """Detect and decode all QR codes in the image. Returns list of {data, bbox} dicts."""
+    results = []
+    try:
+        retval, decoded_info, points, _ = _qr_detector.detectAndDecodeMulti(img_bgr)
+        if retval and decoded_info:
+            for text, pts in zip(decoded_info, points if points is not None else []):
+                if text:
+                    bbox = None
+                    if pts is not None and len(pts) > 0:
+                        p = pts.reshape(-1, 2).astype(int)
+                        x, y = int(p[:, 0].min()), int(p[:, 1].min())
+                        x2, y2 = int(p[:, 0].max()), int(p[:, 1].max())
+                        bbox = [x, y, x2 - x, y2 - y]
+                    results.append({"data": text, "bbox": bbox})
+    except Exception:
+        pass
+    return results
+
+
 # ---------------- Physical scale (mm per pixel) ----------------
 def estimate_scale(img_bgr: np.ndarray, pack_width_mm: float, pack_height_mm: float | None = None, assumed: bool = False):
     """Detect the pack (largest contour) → mm/px. PDP area = width × height of the visible front panel."""

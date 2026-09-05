@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 load_dotenv()
-from ocr import preprocess, ocr_lines, estimate_scale, annotate
+from ocr import preprocess, ocr_lines, estimate_scale, annotate, detect_qr
 from extractor import extract
 from rules import evaluate, summarize
 from db import init_db, save_inspection, list_inspections, get_inspection, stats
@@ -59,9 +59,13 @@ async def scan(file: UploadFile = File(...), mode: str = "live", save: bool = Fa
     img, gray = preprocess(img, deskew=(mode != "live"))
     H, W = gray.shape
     lines = ocr_lines(gray, lang)
+    qr_codes = detect_qr(img)
     fields = extract(lines)
+    # Include QR-decoded text in full_text so rules engine can see it
+    qr_text = " ".join(q["data"] for q in qr_codes if q.get("data"))
+    full_text = " ".join(l["text"] for l in lines) + (" " + qr_text if qr_text else "")
     scale = estimate_scale(img, pack_width_mm or DEFAULT_WIDTH_MM.get(category, 150), pack_height_mm, assumed=pack_width_mm is None)
-    checks = evaluate(fields, scale, category, full_text=" ".join(l["text"] for l in lines))
+    checks = evaluate(fields, scale, category, full_text=full_text)
 
     annotated_b64 = buf = None
     if mode != "live" or save:
@@ -73,9 +77,15 @@ async def scan(file: UploadFile = File(...), mode: str = "live", save: bool = Fa
         if c.get("bbox"):
             x, y, w, h = c["bbox"]; c["bbox"] = [round(x / W, 4), round(y / H, 4), round(w / W, 4), round(h / H, 4)]
 
+    # Normalize QR bounding boxes to 0-1 like compliance check bboxes
+    for q in qr_codes:
+        if q.get("bbox"):
+            x, y, w, h = q["bbox"]
+            q["bbox"] = [round(x/W, 4), round(y/H, 4), round(w/W, 4), round(h/H, 4)]
+
     res = {"id": None, "mode": mode, "lang": lang, "category": category,
            "product_name": product_name or _guess_name(lines, H), "scale": scale, "fields": fields, "checks": checks,
-           **summarize(checks), "ocr_lines": [l["text"] for l in lines][:80], "image_size": [W, H],
+           **summarize(checks), "qr_codes": qr_codes, "ocr_lines": [l["text"] for l in lines][:80], "image_size": [W, H],
            "timing_ms": int((time.time() - t0) * 1000), "annotated_image": annotated_b64}
 
     if save:

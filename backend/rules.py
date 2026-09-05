@@ -1,12 +1,13 @@
-"""Rule engine – Legal Metrology (Packaged Commodities) Rules, 2011."""
+"""Rule engine – Legal Metrology (Packaged Commodities) Rules, 2011 + FSS Act 2006 (FSSAI)."""
 import os
 
 CONF_THRESHOLD = int(os.getenv("CONF_THRESHOLD", "85"))
 STD_UNITS = {"g", "gm", "gms", "gram", "grams", "kg", "kgs", "mg", "ml", "l", "ltr", "litre", "liter",
              "किग्रा", "किलो", "किलोग्राम", "ग्राम", "ग्रा", "मिली", "लीटर", "ली"}
-FOOD_LIKE = {"FMCG Food", "Grocery Staples", "Personal Care"}
+FOOD_LIKE = {"FMCG Food", "Grocery Staples"}
+PERSONAL_CARE = {"Personal Care"}
 
-# Rule 7 + Second Schedule (printed labels): min numeral height by Principal Display Panel area
+# Rule 7 + Second Schedule: min numeral height by Principal Display Panel area
 _MIN_H = [(100, 1.0), (500, 2.0), (2500, 4.0), (float("inf"), 6.0)]
 
 
@@ -45,9 +46,9 @@ def evaluate(fields: dict, scale: dict | None, category: str, full_text: str = "
             add(key + "_font", f"{label} — Numeral Height", "ok", ref,
                 f"{label} numerals ≈ {h_mm:.2f} mm ≥ required {req:.1f} mm.", None, meas, f)
 
-    # 1. Manufacturer / Packer / Importer — Rule 6(1)(a)
+    # ── 1. Manufacturer / Packer / Importer — Rule 6(1)(a) ──
     f = fields.get("manufacturer")
-    ref = "Rule 6(1)(a) — Name & complete address of manufacturer / packer / importer"
+    ref = "Rule 6(1)(a) LM(PC) Rules 2011 — Name & complete address of manufacturer / packer / importer"
     if not f:
         add("manufacturer", "Manufacturer / Packer Details", "bad", ref,
             "No 'Mfd by / Pkd by / Marketed by' declaration detected on visible panels.",
@@ -60,9 +61,9 @@ def evaluate(fields: dict, scale: dict | None, category: str, full_text: str = "
     else:
         add("manufacturer", "Manufacturer / Packer Details", "ok", ref, f"Detected: {f['value'][:120]}", f=f)
 
-    # 2. Net Quantity — Rule 6(1)(c) / Rule 8
+    # ── 2. Net Quantity — Rule 6(1)(c) / Rule 8 ──
     f = fields.get("net_quantity")
-    ref = "Rule 6(1)(c) · Rule 8 — Net quantity in standard units, no qualifying words"
+    ref = "Rule 6(1)(c) · Rule 8 LM(PC) Rules 2011 — Net quantity in standard units, no qualifying words"
     if not f:
         add("net_quantity", "Net Quantity", "bad", ref, "No net quantity declaration detected.",
             "<b>Correction:</b> Declare 'Net Quantity: <value> <standard unit>' (g / kg / ml / L) on the principal display panel.",
@@ -77,18 +78,18 @@ def evaluate(fields: dict, scale: dict | None, category: str, full_text: str = "
         add("net_quantity", "Net Quantity", "ok", ref, f"Detected '{f['value']}' — standard unit, no qualifying words.", f=f)
     font_check("net_quantity", "Net Quantity", f)
 
-    # 3. Month & Year of Manufacture — Rule 6(1)(d)
+    # ── 3. Month & Year of Manufacture — Rule 6(1)(d) ──
     f = fields.get("mfg_date")
-    ref = "Rule 6(1)(d) — Month and year of manufacture / pre-packing / import"
+    ref = "Rule 6(1)(d) LM(PC) Rules 2011 — Month and year of manufacture / pre-packing / import"
     if not f:
         add("mfg_date", "Month & Year of Manufacture", "bad", ref, "No manufacturing / packing date detected.",
             "<b>Correction:</b> Print 'Mfg. Date: MM/YYYY' (month and year at minimum).", severity="critical")
     else:
         add("mfg_date", "Month & Year of Manufacture", "ok", ref, f"Detected: {f['value']}", f=f)
 
-    # 4. Retail Sale Price — Rule 6(1)(e)
+    # ── 4. Retail Sale Price — Rule 6(1)(e) ──
     f = fields.get("mrp")
-    ref = "Rule 6(1)(e) — 'Maximum Retail Price ₹… inclusive of all taxes'"
+    ref = "Rule 6(1)(e) LM(PC) Rules 2011 — 'Maximum Retail Price ₹… inclusive of all taxes'"
     if not f:
         add("mrp", "Retail Sale Price (MRP)", "bad", ref, "No MRP declaration detected.",
             "<b>Correction:</b> Print 'MRP ₹<amount> (inclusive of all taxes)'.", severity="critical")
@@ -99,9 +100,9 @@ def evaluate(fields: dict, scale: dict | None, category: str, full_text: str = "
         add("mrp", "Retail Sale Price (MRP)", "ok", ref, f"Detected MRP {f['value']} (inclusive of all taxes).", f=f)
     font_check("mrp", "MRP", f)
 
-    # 5. Consumer care — Rule 6(1)(f)
+    # ── 5. Consumer Care — Rule 6(1)(f) ──
     f = fields.get("consumer_care")
-    ref = "Rule 6(1)(f) — Name, address, telephone number, e-mail of the person/office to be contacted for complaints"
+    ref = "Rule 6(1)(f) LM(PC) Rules 2011 — Name, address, telephone / e-mail for consumer complaints"
     if not f:
         add("consumer_care", "Consumer Care Details", "bad", ref,
             "No consumer-care telephone / e-mail / address detected on visible panels.",
@@ -109,26 +110,74 @@ def evaluate(fields: dict, scale: dict | None, category: str, full_text: str = "
     else:
         add("consumer_care", "Consumer Care Details", "ok", ref, f"Detected: {f['value'][:110]}", f=f)
 
-    # 6. Expiry / Best Before (sector regs; LM cross-check)
+    # ── 6. Batch / Lot Number — Rule 6(2) ──
+    f = fields.get("batch_number")
+    ref = "Rule 6(2) LM(PC) Rules 2011 — Batch number / Lot number / Code number mandatory"
+    if not f:
+        add("batch_number", "Batch / Lot Number", "warn", ref,
+            "No batch / lot / code number detected.",
+            "<b>Correction:</b> Print 'Batch No.: XXXX' or 'Lot No.: XXXX' on the package.")
+    else:
+        add("batch_number", "Batch / Lot Number", "ok", ref, f"Detected: {f['value']}", f=f)
+
+    # ── 7. FSSAI License Number — FSS Act 2006, Reg. 2.2.2 ──
+    f = fields.get("fssai")
+    ref = "FSS Act 2006 · FSSAI Reg. 2.2.2 — 14-digit FSSAI license/registration number mandatory for food products"
+    if category in FOOD_LIKE:
+        if not f:
+            add("fssai", "FSSAI License / Reg. Number", "bad", ref,
+                "No FSSAI license or registration number detected — mandatory for all food products.",
+                "<b>Correction:</b> Print 'FSSAI Lic. No.: <14-digit number>' on the label.",
+                severity="critical")
+        elif not f.get("valid_length"):
+            add("fssai", "FSSAI License / Reg. Number", "warn", ref,
+                f"Detected number '{f['value']}' but FSSAI numbers must be 13–14 digits.",
+                "<b>Action:</b> Verify the FSSAI license/registration number is complete.", f=f)
+        else:
+            add("fssai", "FSSAI License / Reg. Number", "ok", ref,
+                f"Detected FSSAI number: {f['value']}", f=f)
+    elif f:
+        add("fssai", "FSSAI License / Reg. Number", "ok", ref,
+            f"Detected: {f['value']}", f=f)
+
+    # ── 8. Veg / Non-Veg Symbol — FSSAI Food Safety & Standards (Labelling) Reg. 2011 ──
+    f = fields.get("veg_nonveg")
+    ref = "FSSAI Food Safety & Standards (Labelling & Display) Regs. 2020 — Green dot (veg) / Brown dot (non-veg) mandatory"
+    if category in FOOD_LIKE:
+        if not f:
+            add("veg_nonveg", "Veg / Non-Veg Declaration", "warn", ref,
+                "No vegetarian / non-vegetarian declaration detected — mandatory for packaged food.",
+                "<b>Correction:</b> Print green filled circle ● for vegetarian OR brown/red filled circle ● for non-vegetarian on the PDP.")
+        elif f.get("is_nonveg"):
+            add("veg_nonveg", "Veg / Non-Veg Declaration", "ok", ref,
+                f"Non-vegetarian declaration detected: '{f['value']}'. Ensure brown/red dot symbol is present.", f=f)
+        else:
+            add("veg_nonveg", "Veg / Non-Veg Declaration", "ok", ref,
+                f"Vegetarian declaration detected: '{f['value']}'. Ensure green dot symbol is present.", f=f)
+
+    # ── 9. Expiry / Best Before ──
     f = fields.get("expiry")
-    ref = "Rule 6(1)(d) proviso + FSSAI Labelling Regs (food) / D&C Rules (cosmetics) — Best before / Use by"
+    ref = "Rule 6(1)(d) proviso LM(PC) Rules 2011 + FSSAI Reg. 2.1.5 — Best before / Use by date"
     if f:
         add("expiry", "Expiry / Best Before", "ok", ref, f"Detected: {f['value']}", f=f)
-    elif category in FOOD_LIKE:
-        add("expiry", "Expiry / Best Before", "warn", ref, "No 'Best before / Use by / Expiry' found — required for this category.",
+    elif category in FOOD_LIKE | PERSONAL_CARE:
+        add("expiry", "Expiry / Best Before", "warn", ref,
+            "No 'Best before / Use by / Expiry' found — required for this category.",
             "<b>Correction:</b> Add 'Best before <n> months from manufacture' or an expiry date.", severity="minor")
 
-    # 7. Country of origin — imported packages
+    # ── 10. Country of Origin — imported packages, Rule 6(1)(a) proviso ──
     f = fields.get("country_of_origin")
-    ref = "Rule 6(1)(a) proviso — Country of origin (mandatory for imported packages)"
+    ref = "Rule 6(1)(a) proviso LM(PC) Rules 2011 — Country of origin mandatory for imported packages"
     imported = "import" in ft or "आयात" in ft
     if f:
         add("country_of_origin", "Country of Origin", "ok", ref, f"Detected: {f['value']}", f=f)
     elif imported:
-        add("country_of_origin", "Country of Origin", "bad", ref, "Package indicates import but no country of origin found.",
+        add("country_of_origin", "Country of Origin", "bad", ref,
+            "Package indicates import but no country of origin found.",
             "<b>Correction:</b> Declare 'Country of Origin: <country>'.", severity="critical")
     else:
-        add("country_of_origin", "Country of Origin", "info", ref, "Not detected — not applicable unless the package is imported.")
+        add("country_of_origin", "Country of Origin", "info", ref,
+            "Not detected — not applicable unless the package is imported.")
 
     return C
 
@@ -143,4 +192,3 @@ def summarize(checks: list) -> dict:
     critical = any(c["s"] == "bad" and c.get("severity") == "critical" for c in checks)
     status = "Non-Compliant" if (critical or score < 60) else "Needs Review" if (bad or warn) else "Compliant"
     return {"score": score, "status": status, "counts": {"ok": ok, "warn": warn, "bad": bad}, "violations": bad}
-    

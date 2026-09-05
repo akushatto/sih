@@ -334,6 +334,69 @@
             font-size: 14px
         }
 
+        /* ===== QR RESULT TOAST ===== */
+        #qrResult {
+            position: absolute;
+            bottom: 12px;
+            left: 12px;
+            right: 12px;
+            z-index: 20;
+            background: rgba(10, 20, 40, 0.92);
+            backdrop-filter: blur(14px);
+            border: 1px solid rgba(100, 210, 255, 0.35);
+            border-radius: 14px;
+            padding: 12px 14px;
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            transition: opacity .3s;
+        }
+
+        #qrResult .qr-icon {
+            font-size: 22px;
+            flex: none;
+            line-height: 1;
+        }
+
+        #qrResult .qr-body {
+            flex: 1;
+            min-width: 0;
+        }
+
+        #qrResult .qr-label {
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: .1em;
+            text-transform: uppercase;
+            color: var(--teal);
+            margin-bottom: 3px;
+        }
+
+        #qrResult .qr-data {
+            font-size: 12px;
+            color: var(--text);
+            word-break: break-all;
+            white-space: pre-wrap;
+            max-height: 90px;
+            overflow-y: auto;
+        }
+
+        #qrResult .qr-copy {
+            font-size: 11px;
+            margin-top: 6px;
+            padding: 4px 9px;
+            border-radius: 8px;
+            background: rgba(100, 210, 255, 0.15);
+            border: 1px solid rgba(100, 210, 255, 0.3);
+            color: var(--teal);
+            cursor: pointer;
+            font-weight: 600;
+        }
+
+        #qrResult .qr-copy:hover {
+            background: rgba(100, 210, 255, 0.25);
+        }
+
         /* ===== SCANNER ===== */
         .demo-wrap {
             display: grid;
@@ -851,11 +914,20 @@
                                 <p id="qrNote" style="margin-top:6px"></p>
                             </div>
                         </div>
+                        <!-- QR decode result toast -->
+                        <div id="qrResult" hidden>
+                            <span class="qr-icon">▦</span>
+                            <div class="qr-body">
+                                <div class="qr-label">QR Code Detected</div>
+                                <div class="qr-data" id="qrDataText"></div>
+                                <button class="qr-copy" id="qrCopyBtn">Copy</button>
+                            </div>
+                        </div>
                     </div>
                     <div class="stage-foot">
                         <div class="legend"><span><i style="background:var(--green)"></i>OK</span> <span><i
                                     style="background:var(--orange)"></i>Review</span> <span><i
-                                    style="background:var(--red)"></i>Violation</span></div>
+                                    style="background:var(--red)"></i>Violation</span> <span><i style="background:var(--teal)"></i>QR</span></div>
                         <div id="statusText">Ready</div>
                     </div>
                     <div class="controls">
@@ -874,7 +946,8 @@
                     <div class="demo-actions">
                         <button class="btn btn-primary" id="startBtn">Start Live Scan</button>
                         <button class="btn btn-glass" id="captureBtn">Capture & Save</button>
-                        <label class="btn btn-glass" style="cursor:pointer">Upload<input type="file" id="fileInput"
+                        <label class="btn btn-glass" style="cursor:pointer"
+                                onclick="if(stream){stopCam();startBtn.textContent='Start Live Scan';}">Upload<input type="file" id="fileInput"
                                 accept="image/*" hidden></label>
                         <button class="btn btn-glass" id="backBtn" hidden>← Back</button>
                         <button class="btn btn-glass" id="resetBtn">Reset</button>
@@ -939,17 +1012,33 @@
 
     <script>
         /* ================= LabelGuard Scanner ================= */
-        // Cloudflare HTTPS tunnel directly to local Python backend (OpenCV + Tesseract OCR)
         const DEFAULT_BACKEND = "https://our-protect-instructions-eco.trycloudflare.com";
-        
-        let API = localStorage.getItem('lg_backend_url');
-        if (!API) {
+
+        // Smart URL resolution: prefer localhost when running locally
+        function resolveDefaultAPI() {
             if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
-                API = location.port === '8000' ? '' : 'http://localhost:8000';
-            } else {
-                API = DEFAULT_BACKEND;
+                return location.port === '8000' ? '' : 'http://localhost:8000';
             }
+            return DEFAULT_BACKEND;
         }
+
+        let API = localStorage.getItem('lg_backend_url') || resolveDefaultAPI();
+
+        // Auto-clear stale cached URLs by validating on startup
+        (async () => {
+            try {
+                const r = await fetch(`${API}/api/health`, { signal: AbortSignal.timeout(3000) });
+                if (!r.ok) throw new Error('not ok');
+            } catch {
+                // Cached URL is dead — fall back to default
+                const fallback = resolveDefaultAPI();
+                if (fallback !== API) {
+                    console.warn(`[LabelGuard] Cached backend ${API} unreachable — falling back to ${fallback}`);
+                    API = fallback;
+                    localStorage.removeItem('lg_backend_url');
+                }
+            }
+        })();
 
         const $ = s => document.querySelector(s);
         const video = $('#cam'), overlay = $('#overlay'), still = $('#still'), stage = $('#stage'),
@@ -959,10 +1048,113 @@
         const octx = overlay.getContext('2d');
         let stream = null, live = false, busy = false, timer = null;
 
+        // ===== QR scanning state =====
+        let lastQrData = null;
+        let qrHideTimer = null;
+        const qrResultEl = $('#qrResult');
+        const qrDataText = $('#qrDataText');
+
+        // ── Reload detection (Android tab-eviction / back-navigation) ──
+        // If Android killed the tab while the file picker was open and reloaded it,
+        // show a friendly message so the user isn't confused by a blank stage.
+        (() => {
+            const navType = performance.getEntriesByType?.('navigation')[0]?.type;
+            if (navType === 'reload' || navType === 'back_forward') {
+                // Log for debugging; the status bar will show on DOMContentLoaded
+                console.log('[LabelGuard] Page restored after reload/eviction — type:', navType);
+                document.addEventListener('DOMContentLoaded', () => {
+                    const st = document.getElementById('statusText');
+                    if (st) st.textContent = 'Camera was reset — tap Start Live Scan to resume.';
+                });
+            }
+        })();
+
         const setStatus = t => statusText.textContent = t;
         const opts = () => ({ lang: $('#langSel').value, category: $('#catSel').value, pack_width_mm: $('#packW').value || '' });
         const COL = { ok: '#30d158', warn: '#ff9f0a', bad: '#ff453a', info: '#8e8e93' };
         const ICON = { ok: '✓', bad: '✕', warn: '!', info: 'i' };
+
+        // ===== QR Code decoding (client-side, instant, no backend needed) =====
+        function tryDecodeQR(imageData) {
+            if (typeof jsQR === 'undefined') return null;
+            try {
+                return jsQR(imageData.data, imageData.width, imageData.height, {
+                    inversionAttempts: "attemptBoth"
+                });
+            } catch (e) {
+                return null;
+            }
+        }
+
+        function drawQRCorners(code, W, H) {
+            if (!code || !code.location) return;
+            const loc = code.location;
+            const scaleX = W / (video.videoWidth || W);
+            const scaleY = H / (video.videoHeight || H);
+            const pts = [loc.topLeftCorner, loc.topRightCorner, loc.bottomRightCorner, loc.bottomLeftCorner];
+
+            octx.strokeStyle = 'rgba(100,210,255,0.9)';
+            octx.lineWidth = 3;
+            octx.lineJoin = 'round';
+            octx.beginPath();
+            octx.moveTo(pts[0].x * scaleX, pts[0].y * scaleY);
+            for (let i = 1; i < pts.length; i++) {
+                octx.lineTo(pts[i].x * scaleX, pts[i].y * scaleY);
+            }
+            octx.closePath();
+            octx.stroke();
+            octx.fillStyle = 'rgba(100,210,255,0.12)';
+            octx.fill();
+
+            const x = Math.min(...pts.map(p => p.x)) * scaleX;
+            const y = Math.min(...pts.map(p => p.y)) * scaleY;
+            const label = 'QR CODE';
+            octx.font = '700 11px Inter, sans-serif';
+            const tw = octx.measureText(label).width + 10;
+            octx.fillStyle = 'rgba(100,210,255,0.9)';
+            octx.fillRect(x, Math.max(0, y - 20), tw, 18);
+            octx.fillStyle = '#000';
+            octx.fillText(label, x + 5, Math.max(14, y - 6));
+        }
+
+        function showQRResult(data) {
+            if (data === lastQrData) {
+                clearTimeout(qrHideTimer);
+                qrHideTimer = setTimeout(hideQRResult, 6000);
+                return;
+            }
+            lastQrData = data;
+            qrDataText.innerHTML = '';
+            if (/^https?:\/\//i.test(data)) {
+                const a = document.createElement('a');
+                a.href = data;
+                a.target = '_blank';
+                a.rel = 'noopener noreferrer';
+                a.textContent = data;
+                a.style.color = 'var(--teal)';
+                a.style.textDecoration = 'underline';
+                qrDataText.appendChild(a);
+            } else {
+                qrDataText.textContent = data;
+            }
+            qrResultEl.hidden = false;
+            clearTimeout(qrHideTimer);
+            qrHideTimer = setTimeout(hideQRResult, 6000);
+        }
+
+        function hideQRResult() {
+            qrResultEl.hidden = true;
+            lastQrData = null;
+        }
+
+        $('#qrCopyBtn').onclick = () => {
+            if (!lastQrData) return;
+            navigator.clipboard?.writeText(lastQrData).then(() => {
+                const btn = $('#qrCopyBtn');
+                btn.textContent = 'Copied!';
+                setTimeout(() => btn.textContent = 'Copy', 1500);
+            });
+        };
 
         function updateEngineBadge(ok, text) {
             if (!enginePill) return;
@@ -1015,7 +1207,8 @@
             let s = null;
             try {
                 s = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+                    // 640×480 keeps tab memory low — critical on Android to prevent tab eviction
+                    video: { facingMode: { ideal: 'environment' }, width: { ideal: 640 }, height: { ideal: 480 } },
                     audio: false
                 });
             } catch (err) {
@@ -1035,7 +1228,7 @@
             loop();
         }
 
-        function stopCam() { live = false; clearTimeout(timer); stream?.getTracks().forEach(t => t.stop()); stream = null; }
+        function stopCam() { live = false; clearTimeout(timer); stream?.getTracks().forEach(t => t.stop()); stream = null; hideQRResult(); }
         function pauseLive() { live = false; clearTimeout(timer); }
         function resumeLive() { if (stream) { live = true; showLiveUI(); loop(); } }
         function showLiveUI() { video.hidden = false; overlay.hidden = false; still.hidden = true; qrPane.hidden = true; backBtn.hidden = true; }
@@ -1047,6 +1240,16 @@
             c.height = (video.videoHeight || 720) * s;
             c.getContext('2d').drawImage(video, 0, 0, c.width, c.height);
             return new Promise(r => c.toBlob(r, 'image/jpeg', 0.85));
+        }
+
+        // Grab raw ImageData from video for QR scanning (no network required)
+        function grabImageData(maxW = 800) {
+            const c = document.createElement('canvas');
+            const s = Math.min(1, maxW / (video.videoWidth || 1280));
+            c.width = (video.videoWidth || 1280) * s;
+            c.height = (video.videoHeight || 720) * s;
+            c.getContext('2d').drawImage(video, 0, 0, c.width, c.height);
+            return c.getContext('2d').getImageData(0, 0, c.width, c.height);
         }
 
         async function scanBlob(blob, { save = false, mode = 'live' } = {}) {
@@ -1084,10 +1287,27 @@
             if (!busy) {
                 busy = true;
                 try {
-                    const res = await scanBlob(await grabBlob(800), { mode: 'live' });
-                    drawBoxes(res);
-                    renderResults(res);
-                    setStatus(`Live OCR · ${res.timing_ms} ms · ${res.status} · ${res.score}%`);
+                    const W = overlay.width, H = overlay.height;
+
+                    // Step 1: QR decode (pure client-side, instant, works offline)
+                    const imgData = grabImageData(640);
+                    const qrCode = tryDecodeQR(imgData);
+
+                    octx.clearRect(0, 0, W, H);
+                    octx.font = '600 13px Inter, sans-serif';
+                    octx.lineWidth = 3;
+
+                    if (qrCode && qrCode.data) {
+                        drawQRCorners(qrCode, W, H);
+                        showQRResult(qrCode.data);
+                        setStatus(`▦ QR Detected · ${qrCode.data.slice(0, 60)}${qrCode.data.length > 60 ? '…' : ''}`);
+                    } else {
+                        // Step 2: OCR label compliance (backend)
+                        const res = await scanBlob(await grabBlob(800), { mode: 'live' });
+                        drawBoxes(res);
+                        renderResults(res);
+                        setStatus(`Live OCR · ${res.timing_ms} ms · ${res.status} · ${res.score}%`);
+                    }
                 } catch (e) {
                     setStatus('Live scan: ' + e.message);
                 }
@@ -1121,12 +1341,24 @@
             const pill = { 'Compliant': 'st-ok', 'Needs Review': 'st-review', 'Non-Compliant': 'st-bad' }[res.status] || 'st-ok';
             const ringCol = { 'Compliant': 'var(--green)', 'Needs Review': 'var(--orange)', 'Non-Compliant': 'var(--red)' }[res.status] || 'var(--green)';
             const { ok, warn, bad } = res.counts || { ok: 0, warn: 0, bad: 0 };
+
+            // QR codes from backend detection (null-safe)
+            const qrSection = (res.qr_codes && res.qr_codes.length > 0) ? `
+    <div style="margin-bottom:10px;padding:12px 14px;border-radius:14px;background:rgba(100,210,255,0.07);border:1px solid rgba(100,210,255,0.25)">
+      <div style="font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--teal);margin-bottom:8px">▦ QR Codes Detected by Scanner</div>
+      ${res.qr_codes.map(q => `
+        <div style="font-size:12px;color:var(--text);margin-bottom:4px;word-break:break-all">
+          ${/^https?:\/\//i.test(q.data || '') ? `<a href="${q.data}" target="_blank" rel="noopener noreferrer" style="color:var(--teal);text-decoration:underline">${q.data}</a>` : (q.data || '')}
+        </div>`).join('')}
+    </div>` : '';
+
             results.innerHTML = `
     <div class="verdict">
       <div class="ring-chart" style="background:conic-gradient(${ringCol} ${res.score}%,rgba(255,255,255,.08) 0)"><b>${res.score}%</b></div>
       <div><h4>${res.status}</h4><p style="font-size:12px;color:var(--muted)">${ok} OK · ${warn} review · ${bad} violation${bad === 1 ? '' : 's'}${res.product_name ? ' · ' + res.product_name : ''}</p></div>
       <span class="status-pill ${pill}">${res.status}</span>
     </div>
+    ${qrSection}
     <div class="rules">${(res.checks || []).map(c => `
       <div class="rule">
         <div class="rule-top"><span class="ic ${c.s}">${ICON[c.s]}</span><b>${c.name}</b><span class="conf">${c.conf}</span></div>
@@ -1135,7 +1367,7 @@
         ${c.fix ? `<div class="fix">${c.fix}</div>` : ''}
       </div>`).join('')}
     </div>
-    ${res.id ? `<div class="res-actions">
+    ${res.id && res.annotated_image ? `<div class="res-actions">
       <a class="btn btn-primary" href="${API}/api/report/${res.id}.pdf" target="_blank">Download Court PDF</a>
       <a class="btn btn-glass" href="${res.annotated_image}" download="${res.id}.jpg">Export Evidence</a>
     </div><p style="font-size:10px;color:var(--muted);margin-top:8px">Saved as ${res.id} · SHA-256 Verified</p>` : ''}`;
@@ -1143,10 +1375,16 @@
 
         function showStill(res) {
             pauseLive();
-            still.src = res.annotated_image;
-            still.hidden = false;
-            video.hidden = true;
-            overlay.hidden = true;
+            if (res.annotated_image) {
+                still.src = res.annotated_image;
+                still.hidden = false;
+                video.hidden = true;
+                overlay.hidden = true;
+            } else {
+                // No annotated image (live mode) — keep camera, just show results
+                still.hidden = true;
+                video.hidden = false;
+            }
             qrPane.hidden = true;
             backBtn.hidden = !stream;
             renderResults(res);
@@ -1178,7 +1416,13 @@
             pauseLive();
             setStatus('Capturing frame & running OCR…');
             try {
-                showStill(await scanBlob(await grabBlob(1600), { save: true, mode: 'upload' }));
+                const res = await scanBlob(await grabBlob(1600), { save: true, mode: 'upload' });
+                if (!res.annotated_image) {
+                    renderResults(res);
+                    setStatus(`Captured · ${res.timing_ms} ms · ${res.status}`);
+                } else {
+                    showStill(res);
+                }
             } catch (e) {
                 setStatus('Error: ' + e.message);
                 resumeLive();
@@ -1188,17 +1432,56 @@
         backBtn.onclick = () => resumeLive();
 
         $('#fileInput').onchange = async e => {
+            // Capture file FIRST before any async work
             const f = e.target.files[0];
             if (!f) return;
+            e.preventDefault();
+            // Reset input safely AFTER capturing — don't do this at top or it fires a second change event
+            setTimeout(() => { e.target.value = ''; }, 0);
+
             pauseLive();
-            setStatus(`Running OCR on ${f.name} (deskew, pytesseract, rules)…`);
+
+            // Step 1: QR decode on uploaded image (instant, client-side)
             try {
-                showStill(await scanBlob(f, { save: true, mode: 'upload' }));
+                const dataUrl = await new Promise((res, rej) => {
+                    const r = new FileReader();
+                    r.onload = ev => res(ev.target.result);
+                    r.onerror = rej;
+                    r.readAsDataURL(f);
+                });
+                const img = await new Promise((res, rej) => {
+                    const i = new Image();
+                    i.onload = () => res(i);
+                    i.onerror = rej;
+                    i.src = dataUrl;
+                });
+                const c = document.createElement('canvas');
+                c.width = img.width; c.height = img.height;
+                c.getContext('2d').drawImage(img, 0, 0);
+                const qr = tryDecodeQR(c.getContext('2d').getImageData(0, 0, c.width, c.height));
+                if (qr && qr.data) showQRResult(qr.data);
+            } catch (_) {}
+
+            // Step 2: Send to backend for full OCR + compliance check
+            setStatus(`Uploading ${f.name} for OCR analysis…`);
+            try {
+                const res = await scanBlob(f, { save: true, mode: 'upload' });
+                if (!res.annotated_image) {
+                    renderResults(res);
+                    setStatus(`Analyzed ${f.name} · ${res.timing_ms} ms · ${res.status}`);
+                } else {
+                    showStill(res);
+                }
             } catch (err) {
-                setStatus('Error: ' + err.message);
-                alert('Analysis failed: ' + err.message + '\n\nPlease check that your Python backend is reachable.');
+                setStatus('Upload failed: ' + err.message);
+                alert(
+                    '❌ Upload analysis failed\n\n' +
+                    err.message + '\n\n' +
+                    'Make sure your Python backend is reachable.\n' +
+                    'Click ⚙ Server to set the correct URL.'
+                );
+                resumeLive();
             }
-            e.target.value = '';
         };
 
         $('#resetBtn').onclick = () => {
@@ -1211,6 +1494,7 @@
             octx.clearRect(0, 0, overlay.width, overlay.height);
             results.innerHTML = '<div class="empty">Start the scanner or upload a label to see the rule-by-rule report.</div>';
             setStatus('Ready');
+            hideQRResult();
         };
 
         $('#qrBtn').onclick = async () => {
