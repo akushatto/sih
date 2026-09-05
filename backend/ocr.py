@@ -56,8 +56,22 @@ def preprocess(img_bgr: np.ndarray, deskew: bool = False, max_side: int = 1600):
 
 # ---------------- OCR ----------------
 def ocr_lines(gray: np.ndarray, lang: str = "eng+hin"):
-    """Word-level OCR grouped into lines with bounding boxes + mean confidence."""
+    """Word-level OCR grouped into lines with bounding boxes + mean confidence.
+    Includes adaptive segmentation: falls back to PSM 11 (sparse packaging layout) if PSM 6 finds insufficient text.
+    """
     d = pytesseract.image_to_data(gray, lang=lang, config=f"--oem 3 --psm {PSM}", output_type=Output.DICT)
+
+    # Check if PSM 6 yielded enough high-confidence text; if not (sparse/irregular packaging layout), fallback to PSM 11
+    valid_words = [t for t, c in zip(d.get("text", []), d.get("conf", [])) if t and t.strip() and float(c) > 35]
+    if len(valid_words) < 4:
+        try:
+            d_fallback = pytesseract.image_to_data(gray, lang=lang, config="--oem 3 --psm 11", output_type=Output.DICT)
+            fb_words = [t for t, c in zip(d_fallback.get("text", []), d_fallback.get("conf", [])) if t and t.strip() and float(c) > 35]
+            if len(fb_words) > len(valid_words):
+                d = d_fallback
+        except Exception:
+            pass
+
     lines = {}
     for i, txt in enumerate(d["text"]):
         t = (txt or "").strip()
@@ -110,7 +124,7 @@ def _extract_bbox_from_pts(pts) -> list[int] | None:
 
 def detect_qr(img_bgr: np.ndarray) -> list[dict]:
     """Detect and decode all QR codes and retail barcodes in the image.
-    Uses multi-pass scanning: Multi-QR -> Single-QR -> CLAHE contrast boost -> 1D Barcode.
+    Uses multi-pass scanning: Multi-QR -> Single-QR -> CLAHE contrast boost -> 1D Barcode -> Multi-angle search.
     Returns list of {data, type, bbox} dicts.
     """
     results = []
@@ -163,6 +177,20 @@ def detect_qr(img_bgr: np.ndarray) -> list[dict]:
                     _add(text, pts, "Barcode")
         except Exception:
             pass
+
+    # 5. Multi-angle Barcode / QR search (crucial for cylindrical bottles, cans, tubes where codes run vertically)
+    if not results and _barcode_detector is not None:
+        for rot_flag in [cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE]:
+            try:
+                r_img = cv2.rotate(img_bgr, rot_flag)
+                retval, b_info, b_type, b_pts = _barcode_detector.detectAndDecodeMulti(r_img)
+                if retval and b_info:
+                    for text, pts in zip(b_info, b_pts if b_pts is not None else []):
+                        _add(text, None, "Barcode")
+                    if results:
+                        break
+            except Exception:
+                pass
 
     return results
 

@@ -28,8 +28,16 @@ init_db()
 
 
 def _guess_name(lines, H):
-    top = [l for l in lines if l["bbox"][1] < 0.4 * H and len(l["text"]) > 3]
-    return max(top, key=lambda l: l["bbox"][3])["text"][:60] if top else None
+    valid = []
+    for l in lines:
+        txt = l.get("text", "").strip()
+        alnum = sum(1 for c in txt if c.isalnum())
+        # Filter out noisy OCR artifacts like '; ae Ty' or punctuation lines
+        if l["bbox"][1] < 0.5 * H and len(txt) >= 4 and alnum >= 4 and (alnum / len(txt)) >= 0.6 and l.get("conf", 0) >= 35:
+            # exclude lines that look like headers, dates, or measurements
+            if not any(k in txt.lower() for k in ["mrp", "mfd", "exp", "net", "qty", "vol", "batch", "lic"]):
+                valid.append(l)
+    return max(valid, key=lambda l: l["bbox"][3])["text"][:60] if valid else None
 
 
 def _lan_ip():

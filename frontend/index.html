@@ -964,6 +964,7 @@
                         <button class="btn btn-glass" id="captureBtn">Capture & Save</button>
                         <label class="btn btn-glass" style="cursor:pointer">Upload<input type="file" id="fileInput"
                                 accept="image/*" hidden></label>
+                        <button class="btn btn-glass" id="rotBtn" title="Rotate image 90° clockwise for sideways bottles">⟲ Rotate</button>
                         <button class="btn btn-glass" id="backBtn" hidden>← Back</button>
                         <button class="btn btn-glass" id="resetBtn">Reset</button>
                     </div>
@@ -1710,6 +1711,37 @@
             else setStatus('Ready');
         };
 
+        let activeImageForRotation = null;
+        let activeRotationAngle = 0;
+
+        $('#rotBtn').onclick = async () => {
+            if (!activeImageForRotation) {
+                alert('Please upload an image or capture a frame first before rotating.');
+                return;
+            }
+            activeRotationAngle = (activeRotationAngle + 90) % 360;
+            const src = activeImageForRotation;
+            const c = document.createElement('canvas');
+            const swap = (activeRotationAngle % 180 !== 0);
+            c.width = swap ? (src.naturalHeight || src.height) : (src.naturalWidth || src.width);
+            c.height = swap ? (src.naturalWidth || src.width) : (src.naturalHeight || src.height);
+            const ctx = c.getContext('2d');
+            ctx.translate(c.width / 2, c.height / 2);
+            ctx.rotate((activeRotationAngle * Math.PI) / 180);
+            ctx.drawImage(src, -(src.naturalWidth || src.width) / 2, -(src.naturalHeight || src.height) / 2);
+
+            setStatus(`Rotated ${activeRotationAngle}° — Re-analyzing with new orientation…`);
+            c.toBlob(async (blob) => {
+                if (!blob) return;
+                try {
+                    const res = await scanBlob(blob, { save: true, mode: 'upload' });
+                    showStill(res);
+                } catch (err) {
+                    setStatus('Rotation scan failed: ' + err.message);
+                }
+            }, 'image/jpeg', 0.9);
+        };
+
         $('#fileInput').onchange = async e => {
             const f = e.target.files[0];
             if (!f) return;
@@ -1731,6 +1763,8 @@
                     i.onerror = rej;
                     i.src = dataUrl;
                 });
+                activeImageForRotation = img;
+                activeRotationAngle = 0;
                 const code = await detectCode(img);
                 if (code && code.data) showQRResult(code.data, code.format);
             } catch (_) {}
