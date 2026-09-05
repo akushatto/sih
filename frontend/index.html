@@ -836,8 +836,9 @@
                     <div class="demo-head">
                         <h3>Scanner</h3>
                         <div style="display:flex;gap:8px;align-items:center">
-                            <span class="pill" id="enginePill" style="font-size:11px;background:rgba(48,209,88,0.15);color:var(--green);border:1px solid rgba(48,209,88,0.3)">● Ready</span>
-                            <button class="pill" id="qrBtn" style="cursor:pointer">📱 Open on phone (QR)</button>
+                            <span class="pill" id="enginePill" style="font-size:11px;background:rgba(48,209,88,0.15);color:var(--green);border:1px solid rgba(48,209,88,0.3)">● Connecting…</span>
+                            <button class="pill" id="serverBtn" style="cursor:pointer" title="Configure Backend API URL">⚙ Server</button>
+                            <button class="pill" id="qrBtn" style="cursor:pointer">📱 Phone</button>
                         </div>
                     </div>
                     <div class="stage" id="stage">
@@ -938,38 +939,76 @@
 
     <script>
         /* ================= LabelGuard Scanner ================= */
-        let API = (location.hostname === 'localhost' || location.hostname === '127.0.0.1') ? (location.port === '8000' ? '' : 'http://localhost:8000') : '';
-        const customApi = localStorage.getItem('lg_custom_api');
-        if (customApi) API = customApi;
+        // Cloudflare HTTPS tunnel directly to local Python backend (OpenCV + Tesseract OCR)
+        const DEFAULT_BACKEND = "https://our-protect-instructions-eco.trycloudflare.com";
+        
+        let API = localStorage.getItem('lg_backend_url');
+        if (!API) {
+            if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
+                API = location.port === '8000' ? '' : 'http://localhost:8000';
+            } else {
+                API = DEFAULT_BACKEND;
+            }
+        }
 
         const $ = s => document.querySelector(s);
         const video = $('#cam'), overlay = $('#overlay'), still = $('#still'), stage = $('#stage'),
             results = $('#results'), statusText = $('#statusText'), qrPane = $('#qrPane'),
             startBtn = $('#startBtn'), captureBtn = $('#captureBtn'), backBtn = $('#backBtn'),
-            enginePill = $('#enginePill');
+            enginePill = $('#enginePill'), serverBtn = $('#serverBtn');
         const octx = overlay.getContext('2d');
         let stream = null, live = false, busy = false, timer = null;
-        let activeInspection = null;
 
         const setStatus = t => statusText.textContent = t;
         const opts = () => ({ lang: $('#langSel').value, category: $('#catSel').value, pack_width_mm: $('#packW').value || '' });
         const COL = { ok: '#30d158', warn: '#ff9f0a', bad: '#ff453a', info: '#8e8e93' };
         const ICON = { ok: '✓', bad: '✕', warn: '!', info: 'i' };
 
-        function updateEngineBadge(isBackend) {
+        function updateEngineBadge(ok, text) {
             if (!enginePill) return;
-            if (isBackend) {
+            if (ok) {
                 enginePill.style.background = 'rgba(48,209,88,0.15)';
                 enginePill.style.color = 'var(--green)';
                 enginePill.style.borderColor = 'rgba(48,209,88,0.3)';
-                enginePill.textContent = '● Backend Connected';
+                enginePill.textContent = '● ' + (text || 'Python OCR Active');
             } else {
-                enginePill.style.background = 'rgba(10,132,255,0.15)';
-                enginePill.style.color = 'var(--blue)';
-                enginePill.style.borderColor = 'rgba(10,132,255,0.3)';
-                enginePill.textContent = '● Edge AI Active';
+                enginePill.style.background = 'rgba(255,69,58,0.15)';
+                enginePill.style.color = 'var(--red)';
+                enginePill.style.borderColor = 'rgba(255,69,58,0.3)';
+                enginePill.textContent = '● ' + (text || 'Backend Offline');
             }
         }
+
+        async function checkBackendHealth() {
+            try {
+                const res = await fetch(`${API}/api/health`, { signal: AbortSignal.timeout(4000) });
+                if (res.ok) {
+                    updateEngineBadge(true, 'Python OCR Active');
+                    return true;
+                }
+            } catch (e) {}
+            updateEngineBadge(false, 'Server Unreachable');
+            return false;
+        }
+
+        serverBtn.onclick = () => {
+            const current = API || (location.origin);
+            const next = prompt('Enter LabelGuard Python Backend URL (e.g. your Cloudflare Tunnel, ngrok, or http://localhost:8000):', current);
+            if (next !== null) {
+                const trimmed = next.trim().replace(/\/+$/, '');
+                localStorage.setItem('lg_backend_url', trimmed);
+                API = trimmed;
+                setStatus('Connecting to ' + (API || 'local') + '…');
+                checkBackendHealth().then(ok => {
+                    if (ok) {
+                        alert('✓ Successfully connected to LabelGuard Python OCR backend at:\n' + API);
+                        loadStats();
+                    } else {
+                        alert('⚠️ Could not reach backend at:\n' + API + '\n\nPlease ensure your uvicorn/tunnel process is running.');
+                    }
+                });
+            }
+        };
 
         async function startCam() {
             if (!navigator.mediaDevices?.getUserMedia) throw new Error('Camera unavailable — use HTTPS or localhost');
@@ -1010,228 +1049,34 @@
             return new Promise(r => c.toBlob(r, 'image/jpeg', 0.85));
         }
 
-        async function detectQR(canvas) {
-            if ('BarcodeDetector' in window) {
-                try {
-                    const detector = new BarcodeDetector({ formats: ['qr_code', 'ean_13', 'ean_8', 'upc_a', 'code_128'] });
-                    const barcodes = await detector.detect(canvas);
-                    if (barcodes && barcodes.length > 0) {
-                        const b = barcodes[0];
-                        return {
-                            data: b.rawValue,
-                            format: b.format || 'QR Code',
-                            bbox: b.boundingBox ? [
-                                b.boundingBox.x / canvas.width,
-                                b.boundingBox.y / canvas.height,
-                                b.boundingBox.width / canvas.width,
-                                b.boundingBox.height / canvas.height
-                            ] : [0.65, 0.65, 0.25, 0.25]
-                        };
-                    }
-                } catch (e) {}
-            }
-            if (typeof jsQR !== 'undefined') {
-                const ctx = canvas.getContext('2d');
-                const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                const code = jsQR(imgData.data, imgData.width, imgData.height, { inversionAttempts: 'dontInvert' });
-                if (code && code.data) {
-                    const loc = code.location;
-                    const x = Math.min(loc.topLeftCorner.x, loc.bottomLeftCorner.x);
-                    const y = Math.min(loc.topLeftCorner.y, loc.topRightCorner.y);
-                    const w = Math.max(loc.topRightCorner.x, loc.bottomRightCorner.x) - x;
-                    const h = Math.max(loc.bottomLeftCorner.y, loc.bottomRightCorner.y) - y;
-                    return {
-                        data: code.data,
-                        format: 'QR Code',
-                        bbox: [x / canvas.width, y / canvas.height, w / canvas.width, h / canvas.height]
-                    };
-                }
-            }
-            return null;
-        }
-
-        function evaluateClientSide({ qr, category, mode }) {
-            const isFood = category === 'FMCG Food';
-            const isPersonal = category === 'Personal Care';
-            const checks = [
-                {
-                    name: 'Common / Generic Name',
-                    ref: 'Rule 6(1)(a) · Principal Display Panel',
-                    s: 'ok',
-                    conf: '96%',
-                    found: isFood ? 'Chana Dal (Packaged Commodity)' : isPersonal ? 'Herbal Face Wash' : 'Packaged Goods',
-                    measure: ['Height: 5.2mm (min 4.0mm) — PASS', 'Placed on PDP front'],
-                    bbox: [0.12, 0.10, 0.76, 0.12]
-                },
-                {
-                    name: 'Net Quantity Declaration',
-                    ref: 'Rule 6(1)(d) & Rule 7 · Standard Units',
-                    s: 'ok',
-                    conf: '98%',
-                    found: isFood ? '1 kg' : isPersonal ? '150 ml' : '500 g',
-                    measure: ['Numeral height: 4.2mm (min 4.0mm) — PASS', 'Valid SI Unit: kg/g/ml'],
-                    bbox: [0.12, 0.28, 0.38, 0.10]
-                },
-                {
-                    name: 'Maximum Retail Price (MRP)',
-                    ref: 'Rule 6(1)(e) · Retail Sale Price',
-                    s: 'ok',
-                    conf: '95%',
-                    found: '₹ 85.00 (inclusive of all taxes)',
-                    measure: ['Rupee symbol: ₹ verified', 'Mandatory "incl. of all taxes" clause present'],
-                    bbox: [0.12, 0.44, 0.52, 0.10]
-                },
-                {
-                    name: 'Manufacturer & Packer Details',
-                    ref: 'Rule 6(1)(b) · Name & Complete Address',
-                    s: 'ok',
-                    conf: '91%',
-                    found: 'Manufactured & Packed by: Apex Foods Pvt Ltd, Sector 62, Noida, UP - 201309',
-                    measure: ['Valid 6-digit postal PIN code detected', 'Full address declared'],
-                    bbox: [0.12, 0.60, 0.76, 0.12]
-                },
-                {
-                    name: 'Country of Origin',
-                    ref: 'Rule 6(10) / Rule 6(1)(n) · Origin Clause',
-                    s: 'ok',
-                    conf: '99%',
-                    found: 'Country of Origin: India',
-                    measure: ['Standard origin declaration compliant'],
-                    bbox: [0.12, 0.76, 0.42, 0.08]
-                },
-                {
-                    name: 'Consumer Care Redressal',
-                    ref: 'Rule 6(1)(g) · Contact Person & Helpline',
-                    s: 'ok',
-                    conf: '94%',
-                    found: 'care@apexfoods.in · Toll-free: 1800-200-1122',
-                    measure: ['Official email & telephone helpline verified'],
-                    bbox: [0.52, 0.76, 0.40, 0.08]
-                }
-            ];
-
-            if (qr && qr.data) {
-                checks.push({
-                    name: 'QR Code / Digital Declarations',
-                    ref: 'Rule 6(1)(h) · Digital Product Passport',
-                    s: 'ok',
-                    conf: '100%',
-                    found: `Decoded ${qr.format}: ${qr.data.length > 50 ? qr.data.slice(0, 50) + '…' : qr.data}`,
-                    measure: ['Digital Link / License verified', 'Instant consumer redressal enabled'],
-                    bbox: qr.bbox || [0.65, 0.35, 0.25, 0.25]
-                });
-            } else {
-                checks.push({
-                    name: 'QR Code (Digital Declarations)',
-                    ref: 'Rule 6(1)(h) · Optional Digital Declarations',
-                    s: 'warn',
-                    conf: '85%',
-                    found: 'No QR code detected in frame; physical mandatory declarations verified',
-                    fix: 'Add GS1 Digital Link / FSSAI QR code for instant digital compliance verification',
-                    bbox: null
-                });
-            }
-
-            const ok = checks.filter(c => c.s === 'ok').length;
-            const warn = checks.filter(c => c.s === 'warn').length;
-            const bad = checks.filter(c => c.s === 'bad').length;
-            const score = Math.round((ok / checks.length) * 100);
-            const status = bad > 0 ? 'Non-Compliant' : warn > 1 ? 'Needs Review' : 'Compliant';
-
-            return {
-                id: 'LG-' + new Date().toISOString().slice(2,10).replace(/-/g,'') + '-' + Math.random().toString(36).substring(2,7).toUpperCase(),
-                mode,
-                category,
-                product_name: isFood ? 'Chana Dal (1 kg)' : isPersonal ? 'Herbal Face Wash (150 ml)' : 'Packaged Commodity',
-                status,
-                score,
-                counts: { ok, warn, bad },
-                checks,
-                timing_ms: Math.floor(Math.random() * 60 + 90),
-                qr: qr || null
-            };
-        }
-
-        async function processBlobClientSide(blob, { save = false, mode = 'live' } = {}) {
-            return new Promise((resolve) => {
-                const img = new Image();
-                img.onload = async () => {
-                    const canvas = document.createElement('canvas');
-                    canvas.width = img.naturalWidth || img.width || 1280;
-                    canvas.height = img.naturalHeight || img.height || 720;
-                    const ctx = canvas.getContext('2d');
-                    ctx.drawImage(img, 0, 0);
-
-                    const qr = await detectQR(canvas);
-                    const res = evaluateClientSide({ qr, category: $('#catSel').value, mode });
-
-                    if (mode !== 'live' || save) {
-                        const W = canvas.width, H = canvas.height;
-                        ctx.lineWidth = Math.max(3, Math.round(W / 300));
-                        ctx.font = `600 ${Math.max(14, Math.round(W / 50))}px Inter, sans-serif`;
-                        res.checks.filter(c => c.bbox).forEach(c => {
-                            const [bx, by, bw, bh] = c.bbox;
-                            const x = bx * W, y = by * H, w = bw * W, h = bh * H;
-                            ctx.strokeStyle = COL[c.s] || '#999';
-                            ctx.fillStyle = (COL[c.s] || '#999') + '26';
-                            ctx.fillRect(x, y, w, h);
-                            ctx.strokeRect(x, y, w, h);
-                            const label = `${c.name} · ${c.conf}`;
-                            const tw = ctx.measureText(label).width + 12;
-                            const th = Math.max(18, Math.round(W / 50) + 6);
-                            ctx.fillStyle = COL[c.s] || '#999';
-                            ctx.fillRect(x, Math.max(0, y - th), tw, th);
-                            ctx.fillStyle = '#fff';
-                            ctx.fillText(label, x + 6, Math.max(th - 4, y - 6));
-                        });
-                        res.annotated_image = canvas.toDataURL('image/jpeg', 0.85);
-
-                        try {
-                            const saved = JSON.parse(localStorage.getItem('lg_inspections') || '[]');
-                            saved.unshift({
-                                id: res.id,
-                                product_name: res.product_name,
-                                category: res.category,
-                                score: res.score,
-                                status: res.status,
-                                date: new Date().toISOString()
-                            });
-                            localStorage.setItem('lg_inspections', JSON.stringify(saved.slice(0, 50)));
-                        } catch (e) {}
-                    }
-                    resolve(res);
-                };
-                img.src = URL.createObjectURL(blob);
-            });
-        }
-
         async function scanBlob(blob, { save = false, mode = 'live' } = {}) {
-            if (API !== null) {
-                try {
-                    const fd = new FormData();
-                    fd.append('file', blob, 'frame.jpg');
-                    const q = new URLSearchParams({ save, mode, ...opts() });
-                    if (!q.get('pack_width_mm')) q.delete('pack_width_mm');
+            const fd = new FormData();
+            fd.append('file', blob, 'frame.jpg');
+            const q = new URLSearchParams({ save, mode, ...opts() });
+            if (!q.get('pack_width_mm')) q.delete('pack_width_mm');
 
-                    const controller = new AbortController();
-                    const timeout = setTimeout(() => controller.abort(), 2500);
-                    const r = await fetch(`${API}/api/scan?${q}`, {
-                        method: 'POST',
-                        body: fd,
-                        signal: controller.signal
-                    });
-                    clearTimeout(timeout);
-                    if (r.ok) {
-                        updateEngineBadge(true);
-                        return await r.json();
-                    }
-                } catch (e) {
-                    // Fall back to client side
+            // 45s timeout to allow full pytesseract OCR on high-res photos
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 45000);
+            try {
+                const r = await fetch(`${API}/api/scan?${q}`, {
+                    method: 'POST',
+                    body: fd,
+                    signal: controller.signal
+                });
+                clearTimeout(timeout);
+                if (!r.ok) {
+                    const txt = await r.text();
+                    throw new Error(`Server returned ${r.status}: ${txt.slice(0, 120)}`);
                 }
+                updateEngineBadge(true, 'Python OCR Active');
+                return await r.json();
+            } catch (err) {
+                clearTimeout(timeout);
+                if (err.name === 'AbortError') throw new Error('OCR timed out after 45s');
+                updateEngineBadge(false, 'Server Error');
+                throw err;
             }
-
-            updateEngineBadge(false);
-            return await processBlobClientSide(blob, { save, mode });
         }
 
         async function loop() {
@@ -1239,16 +1084,16 @@
             if (!busy) {
                 busy = true;
                 try {
-                    const res = await scanBlob(await grabBlob(960), { mode: 'live' });
+                    const res = await scanBlob(await grabBlob(800), { mode: 'live' });
                     drawBoxes(res);
                     renderResults(res);
-                    setStatus(`Live · ${res.timing_ms} ms · ${res.status} · ${res.score}%`);
+                    setStatus(`Live OCR · ${res.timing_ms} ms · ${res.status} · ${res.score}%`);
                 } catch (e) {
-                    setStatus('Scanning: ' + e.message);
+                    setStatus('Live scan: ' + e.message);
                 }
                 busy = false;
             }
-            timer = setTimeout(loop, 600);
+            timer = setTimeout(loop, 900);
         }
 
         function drawBoxes(res) {
@@ -1273,17 +1118,16 @@
         }
 
         function renderResults(res) {
-            activeInspection = res;
             const pill = { 'Compliant': 'st-ok', 'Needs Review': 'st-review', 'Non-Compliant': 'st-bad' }[res.status] || 'st-ok';
             const ringCol = { 'Compliant': 'var(--green)', 'Needs Review': 'var(--orange)', 'Non-Compliant': 'var(--red)' }[res.status] || 'var(--green)';
-            const { ok, warn, bad } = res.counts;
+            const { ok, warn, bad } = res.counts || { ok: 0, warn: 0, bad: 0 };
             results.innerHTML = `
     <div class="verdict">
       <div class="ring-chart" style="background:conic-gradient(${ringCol} ${res.score}%,rgba(255,255,255,.08) 0)"><b>${res.score}%</b></div>
       <div><h4>${res.status}</h4><p style="font-size:12px;color:var(--muted)">${ok} OK · ${warn} review · ${bad} violation${bad === 1 ? '' : 's'}${res.product_name ? ' · ' + res.product_name : ''}</p></div>
       <span class="status-pill ${pill}">${res.status}</span>
     </div>
-    <div class="rules">${res.checks.map(c => `
+    <div class="rules">${(res.checks || []).map(c => `
       <div class="rule">
         <div class="rule-top"><span class="ic ${c.s}">${ICON[c.s]}</span><b>${c.name}</b><span class="conf">${c.conf}</span></div>
         <div class="ref">${c.ref}</div><p>${c.found}</p>
@@ -1292,17 +1136,9 @@
       </div>`).join('')}
     </div>
     ${res.id ? `<div class="res-actions">
-      <button class="btn btn-primary" onclick="downloadReport('${res.id}')">Download Report</button>
+      <a class="btn btn-primary" href="${API}/api/report/${res.id}.pdf" target="_blank">Download Court PDF</a>
       <a class="btn btn-glass" href="${res.annotated_image}" download="${res.id}.jpg">Export Evidence</a>
-    </div><p style="font-size:10px;color:var(--muted);margin-top:8px">Saved inspection ID: ${res.id}</p>` : ''}`;
-        }
-
-        function downloadReport(id) {
-            if (API) {
-                window.open(`${API}/api/report/${id}.pdf`, '_blank');
-                return;
-            }
-            window.print();
+    </div><p style="font-size:10px;color:var(--muted);margin-top:8px">Saved as ${res.id} · SHA-256 Verified</p>` : ''}`;
         }
 
         function showStill(res) {
@@ -1314,7 +1150,7 @@
             qrPane.hidden = true;
             backBtn.hidden = !stream;
             renderResults(res);
-            setStatus(`Verified ${res.id} · ${res.timing_ms} ms · ${res.status}`);
+            setStatus(`Analyzed ${res.id || 'Pack'} · ${res.timing_ms} ms · ${res.status}`);
             loadStats();
         }
 
@@ -1330,17 +1166,17 @@
                 setStatus('Requesting camera…');
                 await startCam();
                 startBtn.textContent = 'Stop Camera';
-                setStatus('Camera active · scanning label');
+                setStatus('Camera active · scanning with Python OCR');
             } catch (e) {
                 setStatus('Camera error: ' + e.message);
-                alert('Camera error: ' + e.message + '\n\nPlease ensure you have granted camera permissions in your browser.');
+                alert('Camera error: ' + e.message);
             }
         };
 
         captureBtn.onclick = async () => {
             if (!stream) return setStatus('Start live scan first, or use Upload.');
             pauseLive();
-            setStatus('Capturing & analyzing…');
+            setStatus('Capturing frame & running OCR…');
             try {
                 showStill(await scanBlob(await grabBlob(1600), { save: true, mode: 'upload' }));
             } catch (e) {
@@ -1355,11 +1191,12 @@
             const f = e.target.files[0];
             if (!f) return;
             pauseLive();
-            setStatus(`Analyzing ${f.name}…`);
+            setStatus(`Running OCR on ${f.name} (deskew, pytesseract, rules)…`);
             try {
                 showStill(await scanBlob(f, { save: true, mode: 'upload' }));
             } catch (err) {
                 setStatus('Error: ' + err.message);
+                alert('Analysis failed: ' + err.message + '\n\nPlease check that your Python backend is reachable.');
             }
             e.target.value = '';
         };
@@ -1383,70 +1220,35 @@
             still.hidden = true;
             qrPane.hidden = false;
             backBtn.hidden = !stream;
-            if (API) {
-                $('#qrImg').src = `${API}/api/qr?t=${Date.now()}`;
-                try {
-                    const w = await (await fetch(`${API}/api/whereami`)).json();
-                    $('#qrUrl').textContent = w.public_url || w.lan_url;
-                    $('#qrNote').textContent = w.public_url ? 'Scan to open scanner anywhere.' : 'Same Wi-Fi only. For phone camera use HTTPS.';
-                } catch {
-                    $('#qrUrl').textContent = location.href;
-                }
-            } else {
-                $('#qrImg').src = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(location.href)}`;
+            $('#qrImg').src = `${API}/api/qr?t=${Date.now()}`;
+            try {
+                const w = await (await fetch(`${API}/api/whereami`)).json();
+                $('#qrUrl').textContent = w.public_url || API || location.origin;
+                $('#qrNote').textContent = w.public_url ? 'Scan to open scanner anywhere.' : 'Open directly on phone.';
+            } catch {
                 $('#qrUrl').textContent = location.href;
-                $('#qrNote').textContent = 'Scan to open LabelGuard directly on your mobile device.';
             }
         };
 
         async function loadStats() {
-            let loaded = false;
-            if (API) {
-                try {
-                    const s = await (await fetch(`${API}/api/stats`)).json();
-                    $('#kpiTotal').textContent = s.total;
-                    $('#kpiRate').textContent = s.compliance_rate + '%';
-                    $('#kpiOpen').textContent = s.open_violations;
-                    $('#kpiAvg').textContent = s.avg_ms ? (s.avg_ms / 1000).toFixed(1) + 's' : '—';
-                    if (s.recent?.length) {
-                        $('#recentBody').innerHTML = s.recent.map(r => `<tr><td>${r.id}</td><td>${r.product_name || '—'}</td><td>${r.category}</td><td>${r.score}%</td>
-            <td><span class="chip ${{ 'Compliant': 'st-ok', 'Needs Review': 'st-review', 'Non-Compliant': 'st-bad' }[r.status] || 'st-ok'}">${r.status}</span></td></tr>`).join('');
-                    }
-                    if (s.by_rule?.length) {
-                        const max = s.by_rule[0][1] || 1;
-                        $('#ruleBars').innerHTML = s.by_rule.map(([rule, n]) => `<div class="bar-row"><span>${rule}</span><div class="track"><div class="fill" style="width:${100 * n / max}%;background:linear-gradient(90deg,#ff453a,#ff9f0a)"></div></div><span>${n}</span></div>`).join('');
-                    }
-                    loaded = true;
-                } catch (e) {}
-            }
-
-            if (!loaded) {
-                try {
-                    const saved = JSON.parse(localStorage.getItem('lg_inspections') || '[]');
-                    if (saved.length) {
-                        const total = saved.length;
-                        const okCount = saved.filter(s => s.status === 'Compliant').length;
-                        const rate = Math.round((okCount / total) * 100);
-                        const openV = saved.filter(s => s.status === 'Non-Compliant').length;
-
-                        $('#kpiTotal').textContent = total;
-                        $('#kpiRate').textContent = rate + '%';
-                        $('#kpiOpen').textContent = openV;
-                        $('#kpiAvg').textContent = '0.1s';
-
-                        $('#recentBody').innerHTML = saved.slice(0, 10).map(r => `<tr><td>${r.id}</td><td>${r.product_name || '—'}</td><td>${r.category}</td><td>${r.score}%</td>
-            <td><span class="chip ${{ 'Compliant': 'st-ok', 'Needs Review': 'st-review', 'Non-Compliant': 'st-bad' }[r.status] || 'st-ok'}">${r.status}</span></td></tr>`).join('');
-
-                        $('#ruleBars').innerHTML = `
-                            <div class="bar-row"><span>Rule 6(1)(e) MRP Clause</span><div class="track"><div class="fill" style="width:75%;background:linear-gradient(90deg,#ff453a,#ff9f0a)"></div></div><span>3</span></div>
-                            <div class="bar-row"><span>Rule 6(1)(d) Font Height</span><div class="track"><div class="fill" style="width:50%;background:linear-gradient(90deg,#ff453a,#ff9f0a)"></div></div><span>2</span></div>
-                            <div class="bar-row"><span>Rule 6(1)(h) QR Redressal</span><div class="track"><div class="fill" style="width:25%;background:linear-gradient(90deg,#ff453a,#ff9f0a)"></div></div><span>1</span></div>
-                        `;
-                    }
-                } catch (e) {}
-            }
+            try {
+                const s = await (await fetch(`${API}/api/stats`)).json();
+                $('#kpiTotal').textContent = s.total;
+                $('#kpiRate').textContent = s.compliance_rate + '%';
+                $('#kpiOpen').textContent = s.open_violations;
+                $('#kpiAvg').textContent = s.avg_ms ? (s.avg_ms / 1000).toFixed(1) + 's' : '—';
+                if (s.recent?.length) {
+                    $('#recentBody').innerHTML = s.recent.map(r => `<tr><td>${r.id}</td><td>${r.product_name || '—'}</td><td>${r.category}</td><td>${r.score}%</td>
+        <td><span class="chip ${{ 'Compliant': 'st-ok', 'Needs Review': 'st-review', 'Non-Compliant': 'st-bad' }[r.status] || 'st-ok'}">${r.status}</span></td></tr>`).join('');
+                }
+                if (s.by_rule?.length) {
+                    const max = s.by_rule[0][1] || 1;
+                    $('#ruleBars').innerHTML = s.by_rule.map(([rule, n]) => `<div class="bar-row"><span>${rule}</span><div class="track"><div class="fill" style="width:${100 * n / max}%;background:linear-gradient(90deg,#ff453a,#ff9f0a)"></div></div><span>${n}</span></div>`).join('');
+                }
+            } catch (e) {}
         }
 
+        checkBackendHealth();
         loadStats();
         window.addEventListener('beforeunload', stopCam);
     </script>
