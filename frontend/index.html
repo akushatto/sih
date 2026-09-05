@@ -1101,7 +1101,19 @@
         const COL = { ok: '#30d158', warn: '#ff9f0a', bad: '#ff453a', info: '#8e8e93' };
         const ICON = { ok: '✓', bad: '✕', warn: '!', info: 'i' };
 
-        // ===== QR Code decoding (client-side, instant, no backend needed) =====
+        // ===== Hardware Barcode & QR Code Engine =====
+        let barcodeDetector = null;
+        if ('BarcodeDetector' in window) {
+            try {
+                barcodeDetector = new BarcodeDetector({
+                    formats: ['qr_code', 'ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'data_matrix']
+                });
+            } catch (e) {
+                barcodeDetector = null;
+            }
+        }
+
+        // Fast fallback for pure JS QR decoding
         function tryDecodeQR(imageData) {
             if (typeof jsQR === 'undefined') return null;
             try {
@@ -1113,44 +1125,126 @@
             }
         }
 
-        function drawQRCorners(code, W, H) {
-            if (!code || !code.location) return;
-            const loc = code.location;
-            const scaleX = W / (video.videoWidth || W);
-            const scaleY = H / (video.videoHeight || H);
-            const pts = [loc.topLeftCorner, loc.topRightCorner, loc.bottomRightCorner, loc.bottomLeftCorner];
+        // Unified multi-format code detector (Hardware GPU -> Canvas -> jsQR)
+        async function detectCode(source) {
+            if (!source) return null;
 
-            octx.strokeStyle = 'rgba(100,210,255,0.9)';
-            octx.lineWidth = 3;
-            octx.lineJoin = 'round';
-            octx.beginPath();
-            octx.moveTo(pts[0].x * scaleX, pts[0].y * scaleY);
-            for (let i = 1; i < pts.length; i++) {
-                octx.lineTo(pts[i].x * scaleX, pts[i].y * scaleY);
+            // 1. Native browser BarcodeDetector API (fastest, full sensor resolution, hardware-accelerated)
+            if (barcodeDetector) {
+                try {
+                    const detected = await barcodeDetector.detect(source);
+                    if (detected && detected.length > 0) {
+                        const b = detected[0];
+                        return {
+                            data: b.rawValue,
+                            format: (b.format || 'qr_code').toUpperCase().replace(/_/g, ' '),
+                            cornerPoints: b.cornerPoints || [],
+                            boundingBox: b.boundingBox || null
+                        };
+                    }
+                } catch (e) {}
             }
-            octx.closePath();
-            octx.stroke();
-            octx.fillStyle = 'rgba(100,210,255,0.12)';
-            octx.fill();
 
-            const x = Math.min(...pts.map(p => p.x)) * scaleX;
-            const y = Math.min(...pts.map(p => p.y)) * scaleY;
-            const label = 'QR CODE';
-            octx.font = '700 11px Inter, sans-serif';
-            const tw = octx.measureText(label).width + 10;
-            octx.fillStyle = 'rgba(100,210,255,0.9)';
-            octx.fillRect(x, Math.max(0, y - 20), tw, 18);
-            octx.fillStyle = '#000';
-            octx.fillText(label, x + 5, Math.max(14, y - 6));
+            // 2. Pure JS fallback with jsQR
+            if (typeof jsQR !== 'undefined') {
+                try {
+                    let imgData = null;
+                    if (source instanceof ImageData) {
+                        imgData = source;
+                    } else if (source.getContext) {
+                        imgData = source.getContext('2d').getImageData(0, 0, source.width, source.height);
+                    } else if (source instanceof HTMLVideoElement || source instanceof HTMLImageElement) {
+                        const w = source.videoWidth || source.naturalWidth || source.width || 640;
+                        const h = source.videoHeight || source.naturalHeight || source.height || 480;
+                        if (w > 0 && h > 0) {
+                            const c = document.createElement('canvas');
+                            const maxDim = 960;
+                            const scale = Math.min(1, maxDim / Math.max(w, h));
+                            c.width = Math.round(w * scale);
+                            c.height = Math.round(h * scale);
+                            const ctx = c.getContext('2d');
+                            ctx.drawImage(source, 0, 0, c.width, c.height);
+                            imgData = ctx.getImageData(0, 0, c.width, c.height);
+                        }
+                    }
+                    if (imgData) {
+                        const qr = tryDecodeQR(imgData);
+                        if (qr && qr.data) {
+                            return {
+                                data: qr.data,
+                                format: 'QR CODE',
+                                location: qr.location
+                            };
+                        }
+                    }
+                } catch (e) {}
+            }
+            return null;
         }
 
-        function showQRResult(data) {
+        function drawQRCorners(code, W, H) {
+            if (!code) return;
+            const vW = video.videoWidth || W;
+            const vH = video.videoHeight || H;
+            const scaleX = W / vW;
+            const scaleY = H / vH;
+            let pts = [];
+
+            if (code.cornerPoints && code.cornerPoints.length >= 4) {
+                pts = code.cornerPoints.map(p => ({ x: p.x * scaleX, y: p.y * scaleY }));
+            } else if (code.location) {
+                const loc = code.location;
+                pts = [
+                    { x: loc.topLeftCorner.x * scaleX, y: loc.topLeftCorner.y * scaleY },
+                    { x: loc.topRightCorner.x * scaleX, y: loc.topRightCorner.y * scaleY },
+                    { x: loc.bottomRightCorner.x * scaleX, y: loc.bottomRightCorner.y * scaleY },
+                    { x: loc.bottomLeftCorner.x * scaleX, y: loc.bottomLeftCorner.y * scaleY }
+                ];
+            } else if (code.boundingBox) {
+                const b = code.boundingBox;
+                pts = [
+                    { x: b.x * scaleX, y: b.y * scaleY },
+                    { x: (b.x + b.width) * scaleX, y: b.y * scaleY },
+                    { x: (b.x + b.width) * scaleX, y: (b.y + b.height) * scaleY },
+                    { x: b.x * scaleX, y: (b.y + b.height) * scaleY }
+                ];
+            }
+
+            if (pts.length < 4) return;
+
+            octx.save();
+            octx.strokeStyle = 'rgba(100,210,255,0.95)';
+            octx.lineWidth = 3.5;
+            octx.lineJoin = 'round';
+            octx.beginPath();
+            octx.moveTo(pts[0].x, pts[0].y);
+            for (let i = 1; i < pts.length; i++) octx.lineTo(pts[i].x, pts[i].y);
+            octx.closePath();
+            octx.stroke();
+            octx.fillStyle = 'rgba(100,210,255,0.18)';
+            octx.fill();
+
+            const minX = Math.min(...pts.map(p => p.x));
+            const minY = Math.min(...pts.map(p => p.y));
+            const label = (code.format || 'QR CODE').toUpperCase();
+            octx.font = '700 11px Inter, sans-serif';
+            const tw = octx.measureText(label).width + 12;
+            octx.fillStyle = 'rgba(100,210,255,0.95)';
+            octx.fillRect(minX, Math.max(0, minY - 22), tw, 20);
+            octx.fillStyle = '#000';
+            octx.fillText(label, minX + 6, Math.max(14, minY - 7));
+            octx.restore();
+        }
+
+        function showQRResult(data, format = 'QR Code') {
             if (data === lastQrData) {
                 clearTimeout(qrHideTimer);
-                qrHideTimer = setTimeout(hideQRResult, 6000);
+                qrHideTimer = setTimeout(hideQRResult, 8000);
                 return;
             }
             lastQrData = data;
+            const labelEl = $('#qrResult .qr-label');
+            if (labelEl) labelEl.textContent = `${format} Detected`;
             qrDataText.innerHTML = '';
             if (/^https?:\/\//i.test(data)) {
                 const a = document.createElement('a');
@@ -1166,7 +1260,7 @@
             }
             qrResultEl.hidden = false;
             clearTimeout(qrHideTimer);
-            qrHideTimer = setTimeout(hideQRResult, 6000);
+            qrHideTimer = setTimeout(hideQRResult, 8000);
         }
 
         function hideQRResult() {
@@ -1405,33 +1499,33 @@
                 try {
                     const W = overlay.width, H = overlay.height;
 
-                    // Step 1: QR decode (pure client-side, instant, works offline)
-                    const imgData = grabImageData(640);
-                    if (!imgData) {
-                        busy = false;
-                        timer = setTimeout(loop, 400);
-                        return;
-                    }
-
-                    const qrCode = tryDecodeQR(imgData);
+                    // Step 1: Detect QR codes & barcodes (client-side, instant, hardware-accelerated)
+                    const code = await detectCode(video);
 
                     octx.clearRect(0, 0, W, H);
-                    octx.font = '600 13px Inter, sans-serif';
-                    octx.lineWidth = 3;
+                    drawViewfinder(W, H);
 
-                    if (qrCode && qrCode.data) {
-                        drawQRCorners(qrCode, W, H);
-                        showQRResult(qrCode.data);
-                        setStatus(`▦ QR Detected · ${qrCode.data.slice(0, 60)}${qrCode.data.length > 60 ? '…' : ''}`);
-                    } else {
-                        // Step 2: OCR label compliance (backend)
-                        const blob = await grabBlob(800);
-                        if (blob) {
-                            const res = await scanBlob(blob, { mode: 'live' });
-                            drawBoxes(res);
-                            renderResults(res);
-                            setStatus(`Live OCR · ${res.timing_ms} ms · ${res.status} · ${res.score}%`);
+                    if (code && code.data) {
+                        drawQRCorners(code, W, H);
+                        showQRResult(code.data, code.format);
+                    }
+
+                    // Step 2: OCR label compliance (backend)
+                    const blob = await grabBlob(800);
+                    if (blob) {
+                        const res = await scanBlob(blob, { mode: 'live' });
+                        octx.clearRect(0, 0, W, H);
+                        drawViewfinder(W, H);
+                        drawBoxes(res);
+                        // Retain code highlight if still present
+                        if (code && code.data) {
+                            drawQRCorners(code, W, H);
                         }
+                        renderResults(res);
+                        const pfx = (code && code.data) ? `▦ ${code.format || 'QR'} + ` : '';
+                        setStatus(`${pfx}Live OCR · ${res.timing_ms} ms · ${res.status} · ${res.score}%`);
+                    } else if (code && code.data) {
+                        setStatus(`▦ ${code.format || 'QR'} Detected · ${code.data.slice(0, 50)}${code.data.length > 50 ? '…' : ''}`);
                     }
                 } catch (e) {
                     setStatus('Live scan: ' + e.message);
@@ -1509,13 +1603,14 @@
             const ringCol = { 'Compliant': 'var(--green)', 'Needs Review': 'var(--orange)', 'Non-Compliant': 'var(--red)' }[res.status] || 'var(--green)';
             const { ok, warn, bad } = res.counts || { ok: 0, warn: 0, bad: 0 };
 
-            // QR codes from backend detection (null-safe)
+            // QR & Barcodes from backend detection (null-safe)
             const qrSection = (res.qr_codes && res.qr_codes.length > 0) ? `
     <div style="margin-bottom:10px;padding:12px 14px;border-radius:14px;background:rgba(100,210,255,0.07);border:1px solid rgba(100,210,255,0.25)">
-      <div style="font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--teal);margin-bottom:8px">▦ QR Codes Detected by Scanner</div>
+      <div style="font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--teal);margin-bottom:8px">▦ ${res.qr_codes.length > 1 ? 'Codes' : 'Code'} Detected (${res.qr_codes.map(q => q.type || 'QR').join(', ')})</div>
       ${res.qr_codes.map(q => `
-        <div style="font-size:12px;color:var(--text);margin-bottom:4px;word-break:break-all">
-          ${/^https?:\/\//i.test(q.data || '') ? `<a href="${q.data}" target="_blank" rel="noopener noreferrer" style="color:var(--teal);text-decoration:underline">${q.data}</a>` : (q.data || '')}
+        <div style="font-size:12px;color:var(--text);margin-bottom:5px;word-break:break-all">
+          <span style="display:inline-block;padding:1px 6px;border-radius:6px;background:rgba(100,210,255,0.15);color:var(--teal);font-size:10px;font-weight:700;margin-right:6px">${(q.type || 'QR').toUpperCase()}</span>
+          ${/^https?:\/\//i.test(q.data || '') ? `<a href="${q.data}" target="_blank" rel="noopener noreferrer" style="color:var(--teal);text-decoration:underline">${q.data}</a>` : `<span>${q.data}</span>`}
         </div>`).join('')}
     </div>` : '';
 
@@ -1636,15 +1731,8 @@
                     i.onerror = rej;
                     i.src = dataUrl;
                 });
-                // Cap canvas to max 1000px to prevent 50MB+ memory spikes on mobile browsers
-                const maxDim = 1000;
-                const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
-                const c = document.createElement('canvas');
-                c.width = Math.round(img.width * scale);
-                c.height = Math.round(img.height * scale);
-                c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
-                const qr = tryDecodeQR(c.getContext('2d').getImageData(0, 0, c.width, c.height));
-                if (qr && qr.data) showQRResult(qr.data);
+                const code = await detectCode(img);
+                if (code && code.data) showQRResult(code.data, code.format);
             } catch (_) {}
 
             // Step 2: backend OCR + compliance check
@@ -1656,6 +1744,11 @@
                     setStatus(`Analyzed & Saved ${res.id || ''} · ${res.timing_ms} ms · ${res.status}`);
                 } else {
                     showStill(res);
+                }
+                // If backend detected codes that client missed, show toast
+                if (res.qr_codes && res.qr_codes.length > 0 && !lastQrData) {
+                    const first = res.qr_codes[0];
+                    showQRResult(first.data, first.type || 'QR Code');
                 }
             } catch (err) {
                 setStatus('Upload failed: ' + err.message);

@@ -87,27 +87,83 @@ def ocr_lines(gray: np.ndarray, lang: str = "eng+hin"):
     return out
 
 
-# ---------------- QR Code Detection ----------------
+# ---------------- QR Code & Barcode Detection ----------------
 _qr_detector = cv2.QRCodeDetector()
+_barcode_detector = None
+try:
+    _barcode_detector = cv2.barcode_BarcodeDetector()
+except Exception:
+    pass
+
+
+def _extract_bbox_from_pts(pts) -> list[int] | None:
+    if pts is None or len(pts) == 0:
+        return None
+    try:
+        p = pts.reshape(-1, 2).astype(int)
+        x, y = int(p[:, 0].min()), int(p[:, 1].min())
+        x2, y2 = int(p[:, 0].max()), int(p[:, 1].max())
+        return [x, y, max(0, x2 - x), max(0, y2 - y)]
+    except Exception:
+        return None
 
 
 def detect_qr(img_bgr: np.ndarray) -> list[dict]:
-    """Detect and decode all QR codes in the image. Returns list of {data, bbox} dicts."""
+    """Detect and decode all QR codes and retail barcodes in the image.
+    Uses multi-pass scanning: Multi-QR -> Single-QR -> CLAHE contrast boost -> 1D Barcode.
+    Returns list of {data, type, bbox} dicts.
+    """
     results = []
+    seen = set()
+
+    def _add(text: str, pts, kind: str = "QR"):
+        t = (text or "").strip()
+        if t and t not in seen:
+            seen.add(t)
+            results.append({"data": t, "type": kind, "bbox": _extract_bbox_from_pts(pts)})
+
+    # 1. Multi-QR detection on raw BGR
     try:
         retval, decoded_info, points, _ = _qr_detector.detectAndDecodeMulti(img_bgr)
         if retval and decoded_info:
             for text, pts in zip(decoded_info, points if points is not None else []):
-                if text:
-                    bbox = None
-                    if pts is not None and len(pts) > 0:
-                        p = pts.reshape(-1, 2).astype(int)
-                        x, y = int(p[:, 0].min()), int(p[:, 1].min())
-                        x2, y2 = int(p[:, 0].max()), int(p[:, 1].max())
-                        bbox = [x, y, x2 - x, y2 - y]
-                    results.append({"data": text, "bbox": bbox})
+                _add(text, pts, "QR")
     except Exception:
         pass
+
+    # 2. Single-QR fallback (reliable when background packaging has high visual noise)
+    if not results:
+        try:
+            text, pts, _ = _qr_detector.detectAndDecode(img_bgr)
+            _add(text, pts, "QR")
+        except Exception:
+            pass
+
+    # 3. Enhanced grayscale + CLAHE pass (resolves glossy plastic glare and low contrast)
+    if not results:
+        try:
+            gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(gray)
+            retval, decoded_info, points, _ = _qr_detector.detectAndDecodeMulti(clahe)
+            if retval and decoded_info:
+                for text, pts in zip(decoded_info, points if points is not None else []):
+                    _add(text, pts, "QR")
+            if not results:
+                text, pts, _ = _qr_detector.detectAndDecode(clahe)
+                _add(text, pts, "QR")
+        except Exception:
+            pass
+
+    # 4. 1D Barcode detector for retail commodities (EAN-13, UPC-A, Code 128)
+    if _barcode_detector is not None:
+        try:
+            retval, b_info, b_type, b_pts = _barcode_detector.detectAndDecodeMulti(img_bgr)
+            if retval and b_info:
+                for text, pts in zip(b_info, b_pts if b_pts is not None else []):
+                    _add(text, pts, "Barcode")
+        except Exception:
+            pass
+
     return results
 
 
