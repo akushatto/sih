@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 .env
 backend/evidence/
+backend/uploads/
+uploads
 backend/*.db
 .DS_Store
 .vercel

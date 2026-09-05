@@ -427,23 +427,39 @@
             border-radius: 18px;
             overflow: hidden;
             aspect-ratio: 4/3;
-            background: #0c1224;
+            background: #000;
             border: 1px solid var(--glass-border)
         }
 
-        .stage video,
-        .stage canvas,
+        .stage video {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            background: #000;
+            z-index: 1;
+        }
+
+        .stage canvas {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            background: transparent !important;
+            pointer-events: none;
+            z-index: 2;
+        }
+
         .stage img#still {
             position: absolute;
             inset: 0;
             width: 100%;
             height: 100%;
             object-fit: contain;
-            background: #0c1224
-        }
-
-        .stage canvas {
-            pointer-events: none
+            background: #0c1224;
+            z-index: 3;
         }
 
         .qr-pane {
@@ -905,7 +921,7 @@
                         </div>
                     </div>
                     <div class="stage" id="stage">
-                        <video id="cam" playsinline muted autoplay></video>
+                        <video id="cam" playsinline webkit-playsinline muted autoplay></video>
                         <canvas id="overlay"></canvas>
                         <img id="still" alt="Result" hidden>
                         <div class="qr-pane" id="qrPane" hidden>
@@ -992,11 +1008,12 @@
                                 <th>Category</th>
                                 <th>Score</th>
                                 <th>Status</th>
+                                <th>Actions</th>
                             </tr>
                         </thead>
                         <tbody id="recentBody">
                             <tr>
-                                <td colspan="5" style="color:var(--muted)">No inspections saved yet.</td>
+                                <td colspan="6" style="color:var(--muted)">No inspections saved yet.</td>
                             </tr>
                         </tbody>
                     </table>
@@ -1213,51 +1230,138 @@
         };
 
         async function startCam() {
-            if (!navigator.mediaDevices?.getUserMedia) throw new Error('Camera unavailable — use HTTPS or localhost');
-            let s = null;
-            try {
-                s = await navigator.mediaDevices.getUserMedia({
-                    // 640×480 keeps tab memory low — critical on Android to prevent tab eviction
-                    video: { facingMode: { ideal: 'environment' }, width: { ideal: 640 }, height: { ideal: 480 } },
-                    audio: false
-                });
-            } catch (err) {
-                s = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                const isSecure = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+                if (!isSecure) {
+                    throw new Error('Camera requires HTTPS. Please access via https:// or localhost');
+                }
+                throw new Error('Camera API (getUserMedia) not supported in this browser.');
             }
+
+            // Stop any existing stream cleanly first
+            if (stream) {
+                try { stream.getTracks().forEach(t => t.stop()); } catch (_) {}
+                stream = null;
+            }
+
+            let s = null;
+            // Progressive fallback: rear camera with ideal res -> rear camera basic -> any video device
+            const constraintTiers = [
+                { video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false },
+                { video: { facingMode: { ideal: 'environment' } }, audio: false },
+                { video: true, audio: false }
+            ];
+
+            let lastErr = null;
+            for (const c of constraintTiers) {
+                try {
+                    s = await navigator.mediaDevices.getUserMedia(c);
+                    if (s) break;
+                } catch (err) {
+                    lastErr = err;
+                    console.warn('[LabelGuard] Camera constraint tier failed, trying next tier:', err.name, err.message);
+                }
+            }
+
+            if (!s) {
+                throw lastErr || new Error('Could not access any camera device.');
+            }
+
             stream = s;
             video.srcObject = stream;
+            video.muted = true;
+            video.defaultMuted = true;
+            video.playsInline = true;
             video.setAttribute('playsinline', 'true');
-            await video.play();
-            if (!video.videoWidth) {
-                await new Promise(r => video.onloadedmetadata = r);
-            }
-            overlay.width = video.videoWidth || 1280;
-            overlay.height = video.videoHeight || 720;
+            video.setAttribute('webkit-playsinline', 'true');
+            video.setAttribute('muted', 'true');
+
+            // Immediately display camera stage
             showLiveUI();
+
+            // Attempt playback safely
+            try {
+                await video.play();
+            } catch (playErr) {
+                console.warn('[LabelGuard] video.play() notice:', playErr);
+            }
+
+            // Safe dimension sync (never hangs, 1.5s max timeout)
+            await new Promise(resolve => {
+                if (video.videoWidth > 0 && video.videoHeight > 0) return resolve();
+                const done = () => {
+                    cleanup();
+                    resolve();
+                };
+                const cleanup = () => {
+                    video.removeEventListener('loadedmetadata', done);
+                    video.removeEventListener('canplay', done);
+                    video.removeEventListener('playing', done);
+                    clearTimeout(timerId);
+                };
+                video.addEventListener('loadedmetadata', done, { once: true });
+                video.addEventListener('canplay', done, { once: true });
+                video.addEventListener('playing', done, { once: true });
+                const timerId = setTimeout(done, 1500);
+            });
+
+            overlay.width = video.videoWidth || 640;
+            overlay.height = video.videoHeight || 480;
+
+            // Keep overlay canvas in sync if device rotates
+            video.onresize = () => {
+                if (video.videoWidth && video.videoHeight) {
+                    overlay.width = video.videoWidth;
+                    overlay.height = video.videoHeight;
+                    drawViewfinder(overlay.width, overlay.height);
+                }
+            };
+
+            drawViewfinder(overlay.width, overlay.height);
             live = true;
             loop();
         }
 
-        function stopCam() { live = false; clearTimeout(timer); stream?.getTracks().forEach(t => t.stop()); stream = null; hideQRResult(); }
+        function stopCam() {
+            live = false;
+            clearTimeout(timer);
+            if (stream) {
+                stream.getTracks().forEach(t => t.stop());
+                stream = null;
+            }
+            if (video) {
+                video.srcObject = null;
+            }
+            hideQRResult();
+        }
+
         function pauseLive() { live = false; clearTimeout(timer); }
         function resumeLive() { if (stream) { live = true; showLiveUI(); loop(); } }
-        function showLiveUI() { video.hidden = false; overlay.hidden = false; still.hidden = true; qrPane.hidden = true; backBtn.hidden = true; }
+        function showLiveUI() {
+            video.hidden = false;
+            overlay.hidden = false;
+            still.hidden = true;
+            qrPane.hidden = true;
+            backBtn.hidden = true;
+        }
 
         function grabBlob(maxW = 1280) {
+            if (!video || video.readyState < 2 || !video.videoWidth || !video.videoHeight) return null;
             const c = document.createElement('canvas');
-            const s = Math.min(1, maxW / (video.videoWidth || 1280));
-            c.width = (video.videoWidth || 1280) * s;
-            c.height = (video.videoHeight || 720) * s;
+            const s = Math.min(1, maxW / video.videoWidth);
+            c.width = Math.round(video.videoWidth * s);
+            c.height = Math.round(video.videoHeight * s);
             c.getContext('2d').drawImage(video, 0, 0, c.width, c.height);
             return new Promise(r => c.toBlob(r, 'image/jpeg', 0.85));
         }
 
         // Grab raw ImageData from video for QR scanning (no network required)
         function grabImageData(maxW = 800) {
+            if (!video || video.readyState < 2 || !video.videoWidth || !video.videoHeight) return null;
             const c = document.createElement('canvas');
-            const s = Math.min(1, maxW / (video.videoWidth || 1280));
-            c.width = (video.videoWidth || 1280) * s;
-            c.height = (video.videoHeight || 720) * s;
+            const s = Math.min(1, maxW / video.videoWidth);
+            c.width = Math.round(video.videoWidth * s);
+            c.height = Math.round(video.videoHeight * s);
             c.getContext('2d').drawImage(video, 0, 0, c.width, c.height);
             return c.getContext('2d').getImageData(0, 0, c.width, c.height);
         }
@@ -1265,7 +1369,9 @@
         async function scanBlob(blob, { save = false, mode = 'live' } = {}) {
             const fd = new FormData();
             fd.append('file', blob, 'frame.jpg');
-            const q = new URLSearchParams({ save, mode, ...opts() });
+            fd.append('save', save ? 'true' : 'false');
+            fd.append('mode', mode);
+            const q = new URLSearchParams({ save: save ? 'true' : 'false', mode, ...opts() });
             if (!q.get('pack_width_mm')) q.delete('pack_width_mm');
 
             // 45s timeout to allow full pytesseract OCR on high-res photos
@@ -1301,6 +1407,12 @@
 
                     // Step 1: QR decode (pure client-side, instant, works offline)
                     const imgData = grabImageData(640);
+                    if (!imgData) {
+                        busy = false;
+                        timer = setTimeout(loop, 400);
+                        return;
+                    }
+
                     const qrCode = tryDecodeQR(imgData);
 
                     octx.clearRect(0, 0, W, H);
@@ -1313,10 +1425,13 @@
                         setStatus(`▦ QR Detected · ${qrCode.data.slice(0, 60)}${qrCode.data.length > 60 ? '…' : ''}`);
                     } else {
                         // Step 2: OCR label compliance (backend)
-                        const res = await scanBlob(await grabBlob(800), { mode: 'live' });
-                        drawBoxes(res);
-                        renderResults(res);
-                        setStatus(`Live OCR · ${res.timing_ms} ms · ${res.status} · ${res.score}%`);
+                        const blob = await grabBlob(800);
+                        if (blob) {
+                            const res = await scanBlob(blob, { mode: 'live' });
+                            drawBoxes(res);
+                            renderResults(res);
+                            setStatus(`Live OCR · ${res.timing_ms} ms · ${res.status} · ${res.score}%`);
+                        }
                     }
                 } catch (e) {
                     setStatus('Live scan: ' + e.message);
@@ -1326,9 +1441,51 @@
             timer = setTimeout(loop, 900);
         }
 
+        function drawViewfinder(W, H) {
+            const padX = W * 0.08;
+            const padY = H * 0.08;
+            const boxW = W - 2 * padX;
+            const boxH = H - 2 * padY;
+            const arm = Math.min(32, boxW * 0.12);
+
+            octx.strokeStyle = 'rgba(100, 210, 255, 0.45)';
+            octx.lineWidth = 2.5;
+            octx.lineCap = 'round';
+
+            // Top-Left
+            octx.beginPath();
+            octx.moveTo(padX, padY + arm);
+            octx.lineTo(padX, padY);
+            octx.lineTo(padX + arm, padY);
+            octx.stroke();
+
+            // Top-Right
+            octx.beginPath();
+            octx.moveTo(padX + boxW - arm, padY);
+            octx.lineTo(padX + boxW, padY);
+            octx.lineTo(padX + boxW, padY + arm);
+            octx.stroke();
+
+            // Bottom-Right
+            octx.beginPath();
+            octx.moveTo(padX + boxW, padY + boxH - arm);
+            octx.lineTo(padX + boxW, padY + boxH);
+            octx.lineTo(padX + boxW - arm, padY + boxH);
+            octx.stroke();
+
+            // Bottom-Left
+            octx.beginPath();
+            octx.moveTo(padX + arm, padY + boxH);
+            octx.lineTo(padX, padY + boxH);
+            octx.lineTo(padX, padY + boxH - arm);
+            octx.stroke();
+        }
+
         function drawBoxes(res) {
             const W = overlay.width, H = overlay.height;
             octx.clearRect(0, 0, W, H);
+            drawViewfinder(W, H);
+
             octx.font = '600 13px Inter, sans-serif';
             octx.lineWidth = 3;
             (res.checks || []).filter(c => c.bbox).forEach(c => {
@@ -1377,10 +1534,11 @@
         ${c.fix ? `<div class="fix">${c.fix}</div>` : ''}
       </div>`).join('')}
     </div>
-    ${res.id && res.annotated_image ? `<div class="res-actions">
-      <a class="btn btn-primary" href="${API}/api/report/${res.id}.pdf" target="_blank">Download Court PDF</a>
-      <a class="btn btn-glass" href="${res.annotated_image}" download="${res.id}.jpg">Export Evidence</a>
-    </div><p style="font-size:10px;color:var(--muted);margin-top:8px">Saved as ${res.id} · SHA-256 Verified</p>` : ''}`;
+    ${res.id ? `<div class="res-actions" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+      <a class="btn btn-primary" href="${API}/api/report/${res.id}.pdf" target="_blank">📄 Download Court PDF</a>
+      <a class="btn btn-glass" href="${API}/evidence/${res.id}.jpg" target="_blank">🖼️ View Image</a>
+      ${res.annotated_image ? `<a class="btn btn-glass" href="${res.annotated_image}" download="${res.id}_annotated.jpg">💾 Export Evidence</a>` : ''}
+    </div><p style="font-size:11px;color:var(--green);margin-top:8px">✓ Saved to server: <b>${res.id}</b> (in uploads & evidence) · SHA-256 Verified</p>` : ''}`;
         }
 
         function showStill(res) {
@@ -1396,9 +1554,9 @@
                 video.hidden = false;
             }
             qrPane.hidden = true;
-            backBtn.hidden = !stream;
+            backBtn.hidden = false;
             renderResults(res);
-            setStatus(`Analyzed ${res.id || 'Pack'} · ${res.timing_ms} ms · ${res.status}`);
+            setStatus(`Analyzed & Saved ${res.id || 'Pack'} · ${res.timing_ms} ms · ${res.status}`);
             loadStats();
         }
 
@@ -1406,30 +1564,38 @@
             if (stream) {
                 stopCam();
                 startBtn.textContent = 'Start Live Scan';
-                setStatus('Stopped');
+                setStatus('Camera stopped');
                 octx.clearRect(0, 0, overlay.width, overlay.height);
                 return;
             }
             try {
+                startBtn.disabled = true;
+                startBtn.textContent = 'Starting…';
                 setStatus('Requesting camera…');
                 await startCam();
                 startBtn.textContent = 'Stop Camera';
-                setStatus('Camera active · scanning with Python OCR');
+                setStatus('Camera active · scanning live');
             } catch (e) {
+                stopCam();
+                startBtn.textContent = 'Start Live Scan';
                 setStatus('Camera error: ' + e.message);
-                alert('Camera error: ' + e.message);
+                alert('⚠️ Camera Error:\n\n' + e.message + '\n\nPlease ensure camera access is allowed in your browser settings and you are on HTTPS.');
+            } finally {
+                startBtn.disabled = false;
             }
         };
 
         captureBtn.onclick = async () => {
             if (!stream) return setStatus('Start live scan first, or use Upload.');
+            const blob = await grabBlob(1600);
+            if (!blob) return setStatus('Camera frame not ready yet.');
             pauseLive();
             setStatus('Capturing frame & running OCR…');
             try {
-                const res = await scanBlob(await grabBlob(1600), { save: true, mode: 'upload' });
+                const res = await scanBlob(blob, { save: true, mode: 'upload' });
                 if (!res.annotated_image) {
                     renderResults(res);
-                    setStatus(`Captured · ${res.timing_ms} ms · ${res.status}`);
+                    setStatus(`Captured & Saved ${res.id || ''} · ${res.timing_ms} ms · ${res.status}`);
                 } else {
                     showStill(res);
                 }
@@ -1439,7 +1605,15 @@
             }
         };
 
-        backBtn.onclick = () => resumeLive();
+        backBtn.onclick = () => {
+            still.hidden = true;
+            qrPane.hidden = true;
+            video.hidden = false;
+            overlay.hidden = false;
+            backBtn.hidden = !stream;
+            if (stream) resumeLive();
+            else setStatus('Ready');
+        };
 
         $('#fileInput').onchange = async e => {
             const f = e.target.files[0];
@@ -1448,7 +1622,7 @@
             pauseLive();
             setStatus(`Reading ${f.name}…`);
 
-            // Step 1: client-side QR decode (instant, no backend)
+            // Step 1: client-side QR decode (instant, bounded memory canvas)
             try {
                 const dataUrl = await new Promise((res, rej) => {
                     const r = new FileReader();
@@ -1462,20 +1636,24 @@
                     i.onerror = rej;
                     i.src = dataUrl;
                 });
+                // Cap canvas to max 1000px to prevent 50MB+ memory spikes on mobile browsers
+                const maxDim = 1000;
+                const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
                 const c = document.createElement('canvas');
-                c.width = img.width; c.height = img.height;
-                c.getContext('2d').drawImage(img, 0, 0);
+                c.width = Math.round(img.width * scale);
+                c.height = Math.round(img.height * scale);
+                c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
                 const qr = tryDecodeQR(c.getContext('2d').getImageData(0, 0, c.width, c.height));
                 if (qr && qr.data) showQRResult(qr.data);
             } catch (_) {}
 
             // Step 2: backend OCR + compliance check
-            setStatus(`Uploading ${f.name} for OCR analysis…`);
+            setStatus(`Uploading ${f.name} for OCR analysis & evidence storage…`);
             try {
                 const res = await scanBlob(f, { save: true, mode: 'upload' });
                 if (!res.annotated_image) {
                     renderResults(res);
-                    setStatus(`Analyzed · ${res.timing_ms} ms · ${res.status}`);
+                    setStatus(`Analyzed & Saved ${res.id || ''} · ${res.timing_ms} ms · ${res.status}`);
                 } else {
                     showStill(res);
                 }
@@ -1527,8 +1705,19 @@
                 $('#kpiOpen').textContent = s.open_violations;
                 $('#kpiAvg').textContent = s.avg_ms ? (s.avg_ms / 1000).toFixed(1) + 's' : '—';
                 if (s.recent?.length) {
-                    $('#recentBody').innerHTML = s.recent.map(r => `<tr><td>${r.id}</td><td>${r.product_name || '—'}</td><td>${r.category}</td><td>${r.score}%</td>
-        <td><span class="chip ${{ 'Compliant': 'st-ok', 'Needs Review': 'st-review', 'Non-Compliant': 'st-bad' }[r.status] || 'st-ok'}">${r.status}</span></td></tr>`).join('');
+                    $('#recentBody').innerHTML = s.recent.map(r => `<tr>
+                        <td><b>${r.id}</b></td>
+                        <td>${r.product_name || '—'}</td>
+                        <td>${r.category}</td>
+                        <td>${r.score}%</td>
+                        <td><span class="chip ${{ 'Compliant': 'st-ok', 'Needs Review': 'st-review', 'Non-Compliant': 'st-bad' }[r.status] || 'st-ok'}">${r.status}</span></td>
+                        <td>
+                            <div style="display:flex;gap:6px;align-items:center">
+                                <a href="${API}/evidence/${r.id}.jpg" target="_blank" class="btn btn-glass" style="padding:3px 8px;font-size:11px;text-decoration:none" title="View Saved Image">🖼️ Image</a>
+                                <a href="${API}/api/report/${r.id}.pdf" target="_blank" class="btn btn-primary" style="padding:3px 8px;font-size:11px;text-decoration:none" title="Download Court PDF">📄 PDF</a>
+                            </div>
+                        </td>
+                    </tr>`).join('');
                 }
                 if (s.by_rule?.length) {
                     const max = s.by_rule[0][1] || 1;

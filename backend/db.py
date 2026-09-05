@@ -34,7 +34,9 @@ def init_db():
 
 def to_dict(r: Inspection, light=False):
     d = {"id": r.id, "created_at": r.created_at.isoformat() + "Z", "product_name": r.product_name,
-         "category": r.category, "score": r.score, "status": r.status, "violations": r.violations, "timing_ms": r.timing_ms}
+         "category": r.category, "score": r.score, "status": r.status, "violations": r.violations, "timing_ms": r.timing_ms,
+         "image_url": f"/evidence/{r.id}.jpg", "annotated_url": f"/evidence/{r.id}_annotated.jpg",
+         "pdf_url": f"/api/report/{r.id}.pdf"}
     if not light:
         d.update(checks=r.checks, fields=r.fields, scale=r.scale, image_path=r.image_path, sha256=r.sha256, lang=r.lang)
     return d

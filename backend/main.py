@@ -6,7 +6,7 @@ import cv2, numpy as np, qrcode
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
 load_dotenv()
@@ -18,6 +18,7 @@ from report import build_pdf
 
 ROOT = Path(__file__).resolve().parent
 EVID = ROOT / "evidence"; EVID.mkdir(exist_ok=True)
+UPLOADS = ROOT / "uploads"; UPLOADS.mkdir(exist_ok=True)
 FRONT = ROOT.parent / "frontend"
 DEFAULT_WIDTH_MM = {"FMCG Food": 150, "Personal Care": 60, "Grocery Staples": 200}
 
@@ -41,9 +42,23 @@ def _lan_ip():
         s.close()
 
 
-@app.get("/api/health")
+@app.api_route("/api/health", methods=["GET", "HEAD"])
 def health():
     return {"ok": True, "time": datetime.utcnow().isoformat()}
+
+
+def _decode_image(raw: bytes) -> np.ndarray | None:
+    img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+    if img is not None:
+        return img
+    try:
+        from PIL import Image, ImageOps
+        pil_img = Image.open(io.BytesIO(raw))
+        pil_img = ImageOps.exif_transpose(pil_img)
+        pil_img = pil_img.convert("RGB")
+        return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+    except Exception:
+        return None
 
 
 @app.post("/api/scan")
@@ -52,9 +67,12 @@ async def scan(file: UploadFile = File(...), mode: str = "live", save: bool = Fa
                product_name: str | None = None):
     t0 = time.time()
     raw = await file.read()
-    img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+    img = _decode_image(raw)
     if img is None:
-        raise HTTPException(400, "Invalid image")
+        raise HTTPException(400, "Invalid image: could not decode file")
+
+    if mode == "upload":
+        save = True
 
     img, gray = preprocess(img, deskew=(mode != "live"))
     H, W = gray.shape
@@ -90,10 +108,22 @@ async def scan(file: UploadFile = File(...), mode: str = "live", save: bool = Fa
 
     if save:
         iid = "LG-" + datetime.now().strftime("%y%m%d") + "-" + uuid.uuid4().hex[:5].upper()
-        (EVID / f"{iid}.jpg").write_bytes(raw)
-        (EVID / f"{iid}_annotated.jpg").write_bytes(buf.tobytes())
-        res.update(id=iid, sha256=hashlib.sha256(raw).hexdigest())
-        save_inspection(res, str(EVID / f"{iid}.jpg"))
+        evid_img = EVID / f"{iid}.jpg"
+        evid_ann = EVID / f"{iid}_annotated.jpg"
+        upload_img = UPLOADS / f"{iid}.jpg"
+        evid_img.write_bytes(raw)
+        upload_img.write_bytes(raw)
+        if buf is not None:
+            evid_ann.write_bytes(buf.tobytes())
+        res.update(
+            id=iid,
+            sha256=hashlib.sha256(raw).hexdigest(),
+            image_url=f"/evidence/{iid}.jpg",
+            annotated_url=f"/evidence/{iid}_annotated.jpg",
+            upload_url=f"/uploads/{iid}.jpg",
+            saved=True,
+        )
+        save_inspection(res, str(evid_img))
     return res
 
 
@@ -110,12 +140,30 @@ def api_get(iid: str):
     return r
 
 
+@app.api_route("/api/inspections/{iid}/image", methods=["GET", "HEAD"])
+def api_get_image(iid: str):
+    p = EVID / f"{iid}.jpg"
+    if not p.exists():
+        p = UPLOADS / f"{iid}.jpg"
+    if not p.exists():
+        raise HTTPException(404, "Image not found")
+    return FileResponse(p, media_type="image/jpeg")
+
+
+@app.api_route("/api/inspections/{iid}/annotated", methods=["GET", "HEAD"])
+def api_get_annotated(iid: str):
+    p = EVID / f"{iid}_annotated.jpg"
+    if not p.exists():
+        raise HTTPException(404, "Annotated image not found")
+    return FileResponse(p, media_type="image/jpeg")
+
+
 @app.get("/api/stats")
 def api_stats(days: int = 30):
     return stats(days)
 
 
-@app.get("/api/report/{iid}.pdf")
+@app.api_route("/api/report/{iid}.pdf", methods=["GET", "HEAD"])
 def api_report(iid: str):
     r = get_inspection(iid)
     if not r:
@@ -141,4 +189,7 @@ def qr(request: Request, url: str | None = None):
     return StreamingResponse(b, media_type="image/png", headers={"X-Target-URL": target, "Cache-Control": "no-store"})
 
 
+app.mount("/evidence", StaticFiles(directory=str(EVID)), name="evidence")
+app.mount("/uploads", StaticFiles(directory=str(UPLOADS)), name="uploads")
 app.mount("/", StaticFiles(directory=str(FRONT), html=True), name="frontend")
+
