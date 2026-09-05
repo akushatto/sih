@@ -946,8 +946,7 @@
                     <div class="demo-actions">
                         <button class="btn btn-primary" id="startBtn">Start Live Scan</button>
                         <button class="btn btn-glass" id="captureBtn">Capture & Save</button>
-                        <label class="btn btn-glass" style="cursor:pointer"
-                                onclick="if(stream){stopCam();startBtn.textContent='Start Live Scan';}">Upload<input type="file" id="fileInput"
+                        <label class="btn btn-glass" style="cursor:pointer">Upload<input type="file" id="fileInput"
                                 accept="image/*" hidden></label>
                         <button class="btn btn-glass" id="backBtn" hidden>← Back</button>
                         <button class="btn btn-glass" id="resetBtn">Reset</button>
@@ -1053,6 +1052,17 @@
         let qrHideTimer = null;
         const qrResultEl = $('#qrResult');
         const qrDataText = $('#qrDataText');
+
+        // Stop camera the instant "Upload" is tapped — BEFORE the native picker opens.
+        // This releases the getUserMedia stream so Android won't evict the tab for memory.
+        $('#fileInput').addEventListener('click', () => {
+            if (stream) {
+                stopCam();
+                startBtn.textContent = 'Start Live Scan';
+                octx.clearRect(0, 0, overlay.width, overlay.height);
+                setStatus('Camera stopped for upload…');
+            }
+        });
 
         // ── Reload detection (Android tab-eviction / back-navigation) ──
         // If Android killed the tab while the file picker was open and reloaded it,
