@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+backend/evidence/
+backend/*.db
+.DS_Store

@@ -1,0 +1,12 @@
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+python-multipart==0.0.17
+opencv-python-headless==4.10.0.84
+pytesseract==0.3.13
+numpy==1.26.4
+Pillow==11.0.0
+SQLAlchemy==2.0.36
+qrcode[pil]==8.0
+reportlab==4.2.5
+python-dotenv==1.0.1
+psycopg2-binary==2.9.10
