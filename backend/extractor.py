@@ -5,9 +5,9 @@ UNIT = r"(kg|kgs|g|gm|gms|gram|grams|mg|ml|l|ltr|litre|liter|कि\.?\s?ग्�
 DATE = r"((?:\d{1,2}[/\-.])?(?:\d{1,2}|[A-Za-z]{3,9})\.?[\s,\-/]*\d{2,4})"
 
 PATTERNS = {
-    # Rule 6(1)(c) / Rule 8 - Net Quantity
+    # Rule 6(1)(c) / Rule 8 - Net Quantity / Net Volume
     "net_quantity": re.compile(
-        r"(net\s*(?:qty|quantity|wt|weight|content)s?\.?|नेट\s*(?:मात्रा|वजन)|निवल\s*मात्रा|शुद्ध\s*(?:मात्रा|वजन))"
+        r"(net\s*(?:qty|quantity|wt|weight|vol|volume|content)s?\.?|नेट\s*(?:मात्रा|वजन|आयतन)|निवल\s*(?:मात्रा|आयतन)|शुद्ध\s*(?:मात्रा|वजन|आयतन))"
         r"\s*[:.\-]?\s*(\d+(?:[.,]\d+)?)\s*" + UNIT, re.I),
 
     # Rule 6(1)(e) - MRP
@@ -20,9 +20,9 @@ PATTERNS = {
         r"(mfg\.?|mfd\.?|manufactured|manufacturing|pkd\.?|packed|packing|date\s+of\s+(?:mfg|manufacture|packing)|"
         r"निर्माण\s*(?:तिथि|की\s*तारीख)?|पैकिंग\s*(?:तिथि)?)(?:\s*(?:date|dt\.?|on))?\s*[:.\-]?\s*" + DATE, re.I),
 
-    # Rule 6(1)(d) proviso - Expiry / Best Before
+    # Rule 6(1)(d) proviso - Expiry / Best Before / Use Before
     "expiry": re.compile(
-        r"(exp\.?|expiry|expires|use\s+by|best\s+before|समाप्ति|उपयोग\s+(?:करें|की\s+अवधि)|bb\.?d?)\s*"
+        r"(exp\.?|expiry|expires|use\s+(?:by|before)|best\s+before|समाप्ति|उपयोग\s+(?:करें|की\s+अवधि)|bb\.?d?)\s*"
         r"(?:date|dt\.?|on|within)?\s*[:.\-]?\s*"
         r"(" + DATE[1:-1] + r"|\d{1,2}\s*(?:months?|माह|महीने)|\d{1,3}\s*(?:days?|दिन))", re.I),
 
@@ -55,6 +55,33 @@ PATTERNS = {
     "veg_nonveg": re.compile(
         r"((?:100\s*%?\s*)?(?:pure\s+)?veg(?:etarian)?|non[\s\-]?veg(?:etarian)?|"
         r"शाकाहारी|मांसाहारी|शुद्ध\s*शाकाहारी)", re.I),
+
+    # Rule 6(1)(b) LM(PC) Rules 2011 & FSSAI Reg. 5(1) - Generic / Common Name
+    "generic_name": re.compile(
+        r"(generic\s*name|common\s*name|product\s*name|name\s*of\s*(?:the\s*)?(?:commodity|food|product)|"
+        r"वस्तु\s*का\s*नाम|उत्पाद\s*का\s*नाम)\s*[:.\-]?\s*(.{3,50})", re.I),
+
+    # Rule 6(1)(e) (2022 Amendment) - Unit Sale Price (USP)
+    "unit_sale_price": re.compile(
+        r"(unit\s*sale\s*price|usp|इकाई\s*विक्रय\s*मूल्य)\s*[:.\-]?\s*(?:rs\.?|₹|inr)?\s*(\d+(?:[.,]\d{1,2})?)\s*(?:per|\/)\s*" + UNIT +
+        r"|(?:rs\.?|₹)\s*(\d+(?:[.,]\d{1,2})?)\s*(?:per|\/)\s*(?:g|gm|kg|ml|l|ltr|piece|pc|unit|pack)", re.I),
+
+    # FSSAI Reg. 5(3) - Nutritional Information Panel
+    "nutrition": re.compile(
+        r"(nutritional?\s*(?:information|facts|values?)|पोषण\s*(?:संबंधी\s*)?(?:जानकारी|मान)|"
+        r"energy\s*[:.\-]?\s*\d+|protein\s*[:.\-]?\s*\d+|carbohydrates?\s*[:.\-]?\s*\d+|total\s*fat\s*[:.\-]?\s*\d+)", re.I),
+
+    # FSSAI Reg. 5(2) & Cosmetics Rules 2020 - Ingredients List
+    "ingredients": re.compile(
+        r"(ingredients?|contents?|सामग्री|घटक|रचना|composition)\s*[:.\-]?\s*(.{4,})", re.I),
+
+    # Cosmetics Rules 2020 (under Drugs & Cosmetics Act 1940) - Mfg License No
+    "cosmetic_lic": re.compile(
+        r"(m\.?l\.?\s*(?:no\.?|num)?|mfg\.?\s*lic\.?\s*(?:no\.?|number)?|cosmetic\s*lic\.?\s*no\.?|उत्पादन\s*लाइसेंस)\s*[:.#\-]?\s*([A-Za-z0-9\-\/]{3,25})", re.I),
+
+    # Plastic Waste Management Rules 2016 (Amended 2022) - Recyclability / EPR
+    "recycling_epr": re.compile(
+        r"(epr\s*(?:reg|no|num|number)?\.?|cpcb|spcb|recyclable|recycle|dispose\s*of\s*thoughtfully|keep\s*your\s*city\s*clean|plastic\s*waste|पुनर्चक्रण)\s*[:.#\-]?\s*([A-Za-z0-9\-\/]{2,30})?", re.I),
 }
 
 PIN = re.compile(r"\b[1-9]\d{5}\b")
@@ -112,6 +139,18 @@ def extract(lines: list) -> dict:
             elif name == "veg_nonveg":
                 f["value"] = m.group(0)
                 f["is_nonveg"] = bool(re.search(r"non|मांसाहारी", m.group(0), re.I))
+            elif name == "generic_name":
+                f["value"] = m.group(2).strip()
+            elif name == "unit_sale_price":
+                f["value"] = m.group(0).strip()
+            elif name == "nutrition":
+                f["value"] = m.group(0).strip()
+            elif name == "ingredients":
+                f["value"] = m.group(2).strip()
+            elif name == "cosmetic_lic":
+                f["value"] = m.group(2).strip()
+            elif name == "recycling_epr":
+                f["value"] = m.group(0).strip()
 
             # numeral height (px) for Rule 7 font-size check
             if f.get("numeral"):

@@ -179,6 +179,81 @@ def evaluate(fields: dict, scale: dict | None, category: str, full_text: str = "
         add("country_of_origin", "Country of Origin", "info", ref,
             "Not detected — not applicable unless the package is imported.")
 
+    # ── 11. Generic / Common Name — Rule 6(1)(b) LM(PC) Rules 2011 & FSSAI Reg. 5(1) ──
+    f = fields.get("generic_name")
+    ref = "Rule 6(1)(b) LM(PC) Rules 2011 · FSSAI Reg. 5(1) — Common / generic name of commodity on PDP"
+    if f:
+        add("generic_name", "Generic / Commodity Name", "ok", ref, f"Detected generic name: '{f['value']}'", f=f)
+    else:
+        add("generic_name", "Generic / Commodity Name", "warn", ref,
+            "No explicit 'Generic Name / Common Name' prefix detected on visible panels.",
+            "<b>Correction:</b> Clearly declare the common/generic name of the commodity (e.g. 'Pure Ghee', 'Shampoo', 'Biscuits') on the Principal Display Panel.",
+            severity="minor")
+
+    # ── 12. Unit Sale Price (USP) — Rule 6(1)(e) (2022 Amendment) LM(PC) Rules ──
+    f = fields.get("unit_sale_price")
+    ref = "Rule 6(1)(e) (2022 Amendment) LM(PC) Rules 2011 — Unit Sale Price (₹/g, ₹/ml, ₹/kg, ₹/L) mandatory"
+    if f:
+        add("unit_sale_price", "Unit Sale Price (USP)", "ok", ref, f"Detected: {f['value']}", f=f)
+    elif fields.get("mrp") and fields.get("net_quantity"):
+        add("unit_sale_price", "Unit Sale Price (USP)", "warn", ref,
+            "Unit Sale Price (₹/g, ₹/ml, ₹/kg, ₹/L) not detected alongside MRP.",
+            "<b>Correction:</b> Print Unit Sale Price (e.g. '₹ 0.50 / g' or '₹ 1.20 / ml') mandatory under LM(PC) 2022 Amendment.")
+    else:
+        add("unit_sale_price", "Unit Sale Price (USP)", "info", ref,
+            "Unit Sale Price required where package contains more than 1 unit/g/ml.")
+
+    # ── 13. Nutritional Information — FSSAI (Labelling & Display) Regs. 2020, Reg. 5(3) ──
+    f = fields.get("nutrition")
+    ref = "FSSAI (Labelling & Display) Regs. 2020 Reg. 5(3) — Nutritional info (Energy, Protein, Carbs, Fats) per 100g/ml"
+    if category in FOOD_LIKE:
+        if f:
+            add("nutrition", "Nutritional Information Panel", "ok", ref, f"Detected: {f['value']}", f=f)
+        else:
+            add("nutrition", "Nutritional Information Panel", "warn", ref,
+                "Nutritional Information panel (Energy, Protein, Carbs, Sugars, Fat) not detected.",
+                "<b>Correction:</b> Print mandatory nutritional facts table per 100g/ml or per serve.", severity="minor")
+    elif f:
+        add("nutrition", "Nutritional Information Panel", "ok", ref, f"Detected: {f['value']}", f=f)
+
+    # ── 14. Ingredients List — FSSAI Reg. 5(2) & Cosmetics Rules 2020 Rule 34 ──
+    f = fields.get("ingredients")
+    ref = "FSSAI Reg. 5(2) · Cosmetics Rules 2020 Rule 34 — Complete list of ingredients in descending order"
+    if category in FOOD_LIKE | PERSONAL_CARE:
+        if f:
+            add("ingredients", "Ingredients Declaration", "ok", ref, f"Detected ingredients: {f['value'][:100]}", f=f)
+        else:
+            add("ingredients", "Ingredients Declaration", "warn", ref,
+                "No 'Ingredients / Contents' declaration detected.",
+                "<b>Correction:</b> Add 'Ingredients: ...' listed in descending order of ingoing weight/volume.", severity="minor")
+    elif f:
+        add("ingredients", "Ingredients Declaration", "ok", ref, f"Detected: {f['value'][:100]}", f=f)
+
+    # ── 15. Cosmetic Manufacturing License — Cosmetics Rules, 2020 ──
+    f = fields.get("cosmetic_lic")
+    ref = "Cosmetics Rules, 2020 (Drugs & Cosmetics Act, 1940) — Manufacturing License Number (M.L. No.)"
+    if category in PERSONAL_CARE:
+        if f:
+            add("cosmetic_lic", "Cosmetic Mfg. License (M.L. No.)", "ok", ref, f"Detected License: {f['value']}", f=f)
+        else:
+            add("cosmetic_lic", "Cosmetic Mfg. License (M.L. No.)", "bad", ref,
+                "No Cosmetic Manufacturing License ('Mfg. Lic. No.' / 'M.L. No.') detected — mandatory for cosmetics.",
+                "<b>Correction:</b> Print State Licensing Authority manufacturing license number on personal care packaging.",
+                severity="critical")
+
+    # ── 16. Plastic Waste Management & EPR — PWM Rules 2016, Rule 11 ──
+    f = fields.get("recycling_epr")
+    ref = "Plastic Waste Management Rules 2016 (Amended 2022) Rule 11 — Recyclability mark & CPCB/SPCB EPR registration"
+    if f:
+        add("recycling_epr", "Plastic Waste & Recyclability / EPR", "ok", ref, f"Detected: {f['value']}", f=f)
+    elif "plastic" in ft or "pet" in ft or "hdpe" in ft:
+        add("recycling_epr", "Plastic Waste & Recyclability / EPR", "warn", ref,
+            "Plastic packaging indicated but no recyclability symbol or EPR registration number detected.",
+            "<b>Correction:</b> Print plastic resin code symbol and EPR Registration Number issued by CPCB.")
+    else:
+        add("recycling_epr", "Plastic Waste & Recyclability / EPR", "info", ref,
+            "Not detected — mandatory for plastic packaging under PWM Rules 2016.")
+
     return C
 
 
