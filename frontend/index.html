@@ -1442,16 +1442,13 @@
         backBtn.onclick = () => resumeLive();
 
         $('#fileInput').onchange = async e => {
-            // Capture file FIRST before any async work
             const f = e.target.files[0];
             if (!f) return;
-            e.preventDefault();
-            // Reset input safely AFTER capturing — don't do this at top or it fires a second change event
-            setTimeout(() => { e.target.value = ''; }, 0);
 
             pauseLive();
+            setStatus(`Reading ${f.name}…`);
 
-            // Step 1: QR decode on uploaded image (instant, client-side)
+            // Step 1: client-side QR decode (instant, no backend)
             try {
                 const dataUrl = await new Promise((res, rej) => {
                     const r = new FileReader();
@@ -1472,26 +1469,24 @@
                 if (qr && qr.data) showQRResult(qr.data);
             } catch (_) {}
 
-            // Step 2: Send to backend for full OCR + compliance check
+            // Step 2: backend OCR + compliance check
             setStatus(`Uploading ${f.name} for OCR analysis…`);
             try {
                 const res = await scanBlob(f, { save: true, mode: 'upload' });
                 if (!res.annotated_image) {
                     renderResults(res);
-                    setStatus(`Analyzed ${f.name} · ${res.timing_ms} ms · ${res.status}`);
+                    setStatus(`Analyzed · ${res.timing_ms} ms · ${res.status}`);
                 } else {
                     showStill(res);
                 }
             } catch (err) {
                 setStatus('Upload failed: ' + err.message);
-                alert(
-                    '❌ Upload analysis failed\n\n' +
-                    err.message + '\n\n' +
-                    'Make sure your Python backend is reachable.\n' +
-                    'Click ⚙ Server to set the correct URL.'
-                );
+                alert('❌ Upload failed\n\n' + err.message + '\n\nCheck ⚙ Server URL.');
                 resumeLive();
             }
+
+            // Reset input LAST, after everything is done
+            e.target.value = '';
         };
 
         $('#resetBtn').onclick = () => {
