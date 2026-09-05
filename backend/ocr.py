@@ -5,6 +5,12 @@ import numpy as np
 import pytesseract
 from pytesseract import Output
 
+try:
+    import zxingcpp
+    _HAS_ZXING = True
+except ImportError:
+    _HAS_ZXING = False
+
 if os.getenv("TESSERACT_CMD"):
     pytesseract.pytesseract.tesseract_cmd = os.getenv("TESSERACT_CMD")
 
@@ -64,18 +70,21 @@ def ocr_lines(gray: np.ndarray, lang: str = "eng+hin"):
     primary_lang = "eng" if ("eng" in lang and "hin" in lang) else lang
     d = pytesseract.image_to_data(gray, lang=primary_lang, config=f"--oem 3 --psm {PSM}", output_type=Output.DICT)
 
-    # Check if standard PSM yielded enough high-confidence text; if not (sparse/irregular/oriented packaging layout),
-    # fall back to PSM 1 (Orientation & Script Detection), PSM 11 (sparse text), or PSM 12
-    valid_words = [t for t, c in zip(d.get("text", []), d.get("conf", [])) if t and t.strip() and float(c) > 30]
-    if len(valid_words) < 5:
-        for fb_psm in ["1", "11", "12"]:
+    # Check if standard PSM yielded enough meaningful text; if not (sparse/irregular/oriented packaging layout),
+    # fall back to PSM 12 (Sparse text with OSD), PSM 11 (sparse text), PSM 3 (auto page), or PSM 1
+    def _meaningful_count(words, confs):
+        return sum(1 for w, c in zip(words, confs) if len(w.strip()) >= 3 and any(ch.isalpha() for ch in w) and float(c) > 25)
+
+    valid_cnt = _meaningful_count(d.get("text", []), d.get("conf", []))
+    if valid_cnt < 6:
+        for fb_psm in ["12", "11", "3", "1"]:
             try:
-                d_fallback = pytesseract.image_to_data(gray, lang=primary_lang, config=f"--oem 3 --psm {fb_psm}", output_type=Output.DICT)
-                fb_words = [t for t, c in zip(d_fallback.get("text", []), d_fallback.get("conf", [])) if t and t.strip() and float(c) > 30]
-                if len(fb_words) > len(valid_words):
-                    d = d_fallback
-                    valid_words = fb_words
-                    if len(valid_words) >= 6:
+                d_fb = pytesseract.image_to_data(gray, lang=primary_lang, config=f"--oem 3 --psm {fb_psm}", output_type=Output.DICT)
+                fb_cnt = _meaningful_count(d_fb.get("text", []), d_fb.get("conf", []))
+                if fb_cnt > valid_cnt:
+                    d = d_fb
+                    valid_cnt = fb_cnt
+                    if valid_cnt >= 8:
                         break
             except Exception:
                 pass
@@ -132,7 +141,7 @@ def _extract_bbox_from_pts(pts) -> list[int] | None:
 
 def detect_qr(img_bgr: np.ndarray) -> list[dict]:
     """Detect and decode all QR codes and retail barcodes in the image.
-    Uses multi-pass scanning: Multi-QR -> Single-QR -> CLAHE contrast boost -> 1D Barcode -> Multi-angle search.
+    Uses multi-pass scanning: zxing-cpp (fast & accurate) -> OpenCV Multi-QR -> CLAHE boost -> Multi-angle search.
     Returns list of {data, type, bbox} dicts.
     """
     results = []
@@ -144,16 +153,34 @@ def detect_qr(img_bgr: np.ndarray) -> list[dict]:
             seen.add(t)
             results.append({"data": t, "type": kind, "bbox": _extract_bbox_from_pts(pts)})
 
-    # 1. Multi-QR detection on raw BGR
-    try:
-        retval, decoded_info, points, _ = _qr_detector.detectAndDecodeMulti(img_bgr)
-        if retval and decoded_info:
-            for text, pts in zip(decoded_info, points if points is not None else []):
-                _add(text, pts, "QR")
-    except Exception:
-        pass
+    # 1. Hardware-accelerated zxing-cpp detection (EAN-13, EAN-8, UPC, Code 128, QR)
+    if _HAS_ZXING:
+        try:
+            barcodes = zxingcpp.read_barcodes(img_bgr)
+            for b in barcodes:
+                kind = "Barcode" if any(f in str(b.format) for f in ["EAN", "UPC", "Code", "ITF", "Codabar"]) else "QR"
+                pos = b.position
+                pts = np.array([
+                    [pos.top_left.x, pos.top_left.y],
+                    [pos.top_right.x, pos.top_right.y],
+                    [pos.bottom_right.x, pos.bottom_right.y],
+                    [pos.bottom_left.x, pos.bottom_left.y]
+                ])
+                _add(b.text, pts, kind)
+        except Exception:
+            pass
 
-    # 2. Single-QR fallback (reliable when background packaging has high visual noise)
+    # 2. Multi-QR detection via OpenCV
+    if not results:
+        try:
+            retval, decoded_info, points, _ = _qr_detector.detectAndDecodeMulti(img_bgr)
+            if retval and decoded_info:
+                for text, pts in zip(decoded_info, points if points is not None else []):
+                    _add(text, pts, "QR")
+        except Exception:
+            pass
+
+    # 3. Single-QR fallback
     if not results:
         try:
             text, pts, _ = _qr_detector.detectAndDecode(img_bgr)
@@ -161,23 +188,33 @@ def detect_qr(img_bgr: np.ndarray) -> list[dict]:
         except Exception:
             pass
 
-    # 3. Enhanced grayscale + CLAHE pass (resolves glossy plastic glare and low contrast)
+    # 4. Enhanced grayscale + CLAHE pass (resolves glossy plastic glare and low contrast)
     if not results:
         try:
             gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
             clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(gray)
-            retval, decoded_info, points, _ = _qr_detector.detectAndDecodeMulti(clahe)
-            if retval and decoded_info:
-                for text, pts in zip(decoded_info, points if points is not None else []):
-                    _add(text, pts, "QR")
+            if _HAS_ZXING:
+                barcodes = zxingcpp.read_barcodes(clahe)
+                for b in barcodes:
+                    kind = "Barcode" if any(f in str(b.format) for f in ["EAN", "UPC", "Code"]) else "QR"
+                    pos = b.position
+                    pts = np.array([
+                        [pos.top_left.x, pos.top_left.y],
+                        [pos.top_right.x, pos.top_right.y],
+                        [pos.bottom_right.x, pos.bottom_right.y],
+                        [pos.bottom_left.x, pos.bottom_left.y]
+                    ])
+                    _add(b.text, pts, kind)
             if not results:
-                text, pts, _ = _qr_detector.detectAndDecode(clahe)
-                _add(text, pts, "QR")
+                retval, decoded_info, points, _ = _qr_detector.detectAndDecodeMulti(clahe)
+                if retval and decoded_info:
+                    for text, pts in zip(decoded_info, points if points is not None else []):
+                        _add(text, pts, "QR")
         except Exception:
             pass
 
-    # 4. 1D Barcode detector for retail commodities (EAN-13, UPC-A, Code 128)
-    if _barcode_detector is not None:
+    # 5. 1D Barcode detector for retail commodities via OpenCV
+    if not results and _barcode_detector is not None:
         try:
             retval, b_info, b_type, b_pts = _barcode_detector.detectAndDecodeMulti(img_bgr)
             if retval and b_info:
@@ -186,17 +223,18 @@ def detect_qr(img_bgr: np.ndarray) -> list[dict]:
         except Exception:
             pass
 
-    # 5. Multi-angle Barcode / QR search (crucial for cylindrical bottles, cans, tubes where codes run vertically)
-    if not results and _barcode_detector is not None:
-        for rot_flag in [cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_180, cv2.ROTATE_90_COUNTERCLOCKWISE]:
+    # 6. Multi-angle search (crucial for cylindrical bottles, cans, tubes where codes run vertically)
+    if not results:
+        for rot_flag in [cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE]:
             try:
                 r_img = cv2.rotate(img_bgr, rot_flag)
-                retval, b_info, b_type, b_pts = _barcode_detector.detectAndDecodeMulti(r_img)
-                if retval and b_info:
-                    for text, pts in zip(b_info, b_pts if b_pts is not None else []):
-                        _add(text, None, "Barcode")
-                    if results:
-                        break
+                if _HAS_ZXING:
+                    barcodes = zxingcpp.read_barcodes(r_img)
+                    for b in barcodes:
+                        kind = "Barcode" if any(f in str(b.format) for f in ["EAN", "UPC", "Code"]) else "QR"
+                        _add(b.text, None, kind)
+                        if results:
+                            break
             except Exception:
                 pass
 

@@ -13,6 +13,7 @@ load_dotenv()
 from ocr import preprocess, ocr_lines, estimate_scale, annotate, detect_qr
 from extractor import extract
 from rules import evaluate, summarize
+from catalog import enrich_fields
 from db import init_db, save_inspection, list_inspections, get_inspection, stats
 from report import build_pdf
 
@@ -70,10 +71,23 @@ def _decode_image(raw: bytes) -> np.ndarray | None:
 
 
 @app.post("/api/scan")
-async def scan(file: UploadFile = File(...), mode: str = "live", save: bool = False, lang: str = "eng+hin",
+async def scan(request: Request, file: UploadFile = File(...), mode: str = "live", save: bool = False, lang: str = "eng+hin",
                category: str = "FMCG Food", pack_width_mm: float | None = None, pack_height_mm: float | None = None,
                product_name: str | None = None):
     t0 = time.time()
+    try:
+        form = await request.form()
+        if "save" in form:
+            save = str(form["save"]).lower() in ("true", "1", "yes")
+        if "mode" in form:
+            mode = str(form["mode"])
+        if "category" in form:
+            category = str(form["category"])
+        if "product_name" in form:
+            product_name = str(form["product_name"])
+    except Exception:
+        pass
+
     raw = await file.read()
     img = _decode_image(raw)
     if img is None:
@@ -88,10 +102,9 @@ async def scan(file: UploadFile = File(...), mode: str = "live", save: bool = Fa
     qr_codes = detect_qr(img)
     fields = extract(lines)
 
-    # For uploaded images or captured evidence: if fewer than 3 fields detected,
-    # perform multi-angle OCR scan (crucial for cylindrical bottles, horizontal camera angles, or rotated packaging)
-    if mode != "live" and len(fields) < 3:
-        for rot_flag in [cv2.ROTATE_180, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE]:
+    # Multi-angle OCR scan if fewer than 3 fields detected (essential for cans, bottles, or rotated packaging)
+    if len(fields) < 3:
+        for rot_flag in [cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE, cv2.ROTATE_180]:
             im_rot = cv2.rotate(img, rot_flag)
             _, gray_rot = preprocess(im_rot, deskew=False)
             lines_rot = ocr_lines(gray_rot, lang)
@@ -107,8 +120,12 @@ async def scan(file: UploadFile = File(...), mode: str = "live", save: bool = Fa
     # Include QR-decoded text in full_text so rules engine can see it
     qr_text = " ".join(q["data"] for q in qr_codes if q.get("data"))
     full_text = " ".join(l["text"] for l in lines) + (" " + qr_text if qr_text else "")
+
+    # Enrich extracted declarations via GS1 India & statutory FMCG catalog
+    fields, detected_pname = enrich_fields(fields, qr_codes, full_text=full_text)
+
     scale = estimate_scale(img, pack_width_mm or DEFAULT_WIDTH_MM.get(category, 150), pack_height_mm, assumed=pack_width_mm is None)
-    pname = product_name or _guess_name(lines, H)
+    pname = product_name or detected_pname or _guess_name(lines, H)
     checks = evaluate(fields, scale, category, full_text=full_text, product_name=pname)
 
     annotated_b64 = buf = None
@@ -128,7 +145,7 @@ async def scan(file: UploadFile = File(...), mode: str = "live", save: bool = Fa
             q["bbox"] = [round(x/W, 4), round(y/H, 4), round(w/W, 4), round(h/H, 4)]
 
     res = {"id": None, "mode": mode, "lang": lang, "category": category,
-           "product_name": product_name or _guess_name(lines, H), "scale": scale, "fields": fields, "checks": checks,
+           "product_name": pname, "scale": scale, "fields": fields, "checks": checks,
            **summarize(checks), "qr_codes": qr_codes, "ocr_lines": [l["text"] for l in lines][:80], "image_size": [W, H],
            "timing_ms": int((time.time() - t0) * 1000), "annotated_image": annotated_b64}
 

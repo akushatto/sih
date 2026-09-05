@@ -9,7 +9,7 @@ LM(PC) Rules 2011 itself.
 """
 import os
 
-CONF_THRESHOLD = int(os.getenv("CONF_THRESHOLD", "85"))
+CONF_THRESHOLD = int(os.getenv("CONF_THRESHOLD", "50"))
 
 FOOD_LIKE = {"FMCG Food", "Grocery Staples"}
 PERSONAL_CARE = {"Personal Care"}
@@ -96,7 +96,7 @@ def evaluate(fields: dict, scale: dict | None, category: str, full_text: str = "
         c = {"key": key, "name": name, "s": s, "severity": severity, "ref": ref, "found": found,
              "fix": fix, "measure": measure, "bbox": f.get("bbox") if f else None,
              "conf": f"{f.get('conf', 0):.0f}%" if (f and 'conf' in f) else "—"}
-        if s == "ok" and f and f.get("conf", 100) < CONF_THRESHOLD:
+        if s == "ok" and f and not f.get("verified") and not f.get("on_neck") and not f.get("on_base") and f.get("conf", 100) < CONF_THRESHOLD:
             c["s"] = "warn"
             c["found"] += f" OCR confidence {f['conf']:.0f}% is below the {CONF_THRESHOLD}% auto-approve threshold — routed to human sign-off."
             c["fix"] = c["fix"] or "<b>Action:</b> Inspector confirms this field. No label change needed if verified."

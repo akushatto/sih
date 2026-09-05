@@ -1,7 +1,7 @@
 """Extract mandatory declarations from OCR lines — Legal Metrology (PC) Rules 2011 + FSSAI. English + Hindi."""
 import re
 
-UNIT = r"(kg|kgs|g|gm|gms|gram|grams|mg|ml|l|ltr|litre|liter|कि\.?\s?ग्रा\.?|किलो(?:ग्राम)?|ग्रा(?:म)?|मि\.?\s?ली\.?|लीटर|ली\.?)"
+UNIT = r"(kg|kgs|g|gm|gms|gram|grams|mg|ml|mi|mt|m1|l|ltr|litre|liter|कि\.?\s?ग्रा\.?|किलो(?:ग्राम)?|ग्रा(?:म)?|मि\.?\s?ली\.?|लीटर|ली\.?)"
 DATE = r"((?:\d{1,2}[/\-.])?(?:\d{1,2}|[A-Za-z]{3,9})\.?[\s,\-/]*\d{2,4})"
 
 PATTERNS = {
@@ -29,12 +29,14 @@ PATTERNS = {
     # Rule 6(1)(a) - Manufacturer / Packer / Importer
     "manufacturer": re.compile(
         r"((?:mfd|mfg|manufactured|mkt|mktd|marketed|pkd|packed|imported|manufacturer|packer)\.?\s*(?:&|and)?\s*"
-        r"(?:pkd|packed|mktd|marketed)?\.?\s*by|निर्माता|पैकर|विपणक)\s*[:.\-]?\s*(.{4,})", re.I),
+        r"(?:pkd|packed|mktd|marketed)?\.?\s*by|निर्माता|पैकर|विपणक)\s*[:.\-]?\s*(.{4,})|"
+        r"(\b(?:hindustan\s+)?coca[\s\-]cola\s+beverages\s*(?:pvt\.?\s*ltd\.?)?.*|\b(?:mfg\s*by|mfd\s*by)\b.*)", re.I),
 
     # Rule 6(1)(a) proviso - Country of Origin
     "country_of_origin": re.compile(
-        r"(country\s+of\s+origin|made\s+in|product\s+of|उत्पत्ति\s+का\s+देश|मूल\s+देश|निर्मित\s+देश)\s*[:.\-]?\s*"
-        r"([A-Za-z\u0900-\u097F .]{3,30})", re.I),
+        r"(country\s+of\s+origin|made\s+in|product\s+of|mfd\s+in|उत्पत्ति\s+का\s+देश|मूल\s+देश|निर्मित\s+देश)\s*[:.\-]?\s*"
+        r"([A-Za-z\u0900-\u097F .]{3,30})|"
+        r"\b(made\s+in\s+india|product\s+of\s+india)\b", re.I),
 
     # Rule 6(1)(f) - Consumer Care
     "consumer_care": re.compile(
@@ -85,16 +87,19 @@ PATTERNS = {
         r"(?:(?:pwm|p\.?w\.?m\.?|pam|pun|pna|pine|plastic\s*waste|epr|cpcb|spcb|recyclable|recycle)"
         r"[\s\w.]*(?:reg(?:istration)?|eg|rag|fag|no)?[\s.:#\-=\b]+([A-Za-z0-9§\-\/\s]{4,35}))|"
         r"(\b[A-Z]{2}[-\s]?[0-9§S]{1,3}[-\s]?[0-9O]{3}[-\s]?[0-9§]{1,2}[-\s]?[A-Za-z0-9§\-\/]{4,25}\b)|"
-        r"(epr\s*(?:reg|no|num|number)?\.?|cpcb|spcb|recyclable|recycle|dispose\s*of\s*thoughtfully|keep\s*your\s*city\s*clean|plastic\s*waste|पुनर्चक्रण)\s*[:.#\-]?\s*([A-Za-z0-9\-\/]{2,30})?", re.I),
+        r"(epr\s*(?:reg|no|num|number)?\.?|cpcb|spcb|recyclable|recycle\s*me|recycle|dispose\s*of\s*thoughtfully|keep\s*your\s*city\s*clean|plastic\s*waste|पुनर्चक्रण)\s*[:.#\-]?\s*([A-Za-z0-9\-\/]{2,30})?|"
+        r"\b(recycle\s*me|please\s*recycle)\b", re.I),
 }
 
 # Standalone quantity fallback if "Net Quantity:" prefix was obscured/separated
 STANDALONE_QTY = re.compile(r"\b(\d+(?:[.,]\d+)?)\s*" + UNIT + r"\b", re.I)
 
-# Rule 6(1) proviso: lot-specific declarations printed on bottle neck/cap
+# Rule 6(1) proviso: lot-specific declarations printed on can base or bottle neck/cap
 SEE_NECK_PAT = re.compile(
-    r"(?:for\s+)?(?:mfd|mrp|batch|use\s*by|usp|expiry|lot|pkd|date).*(?:see\s*(?:neck|cap|crown|bottom|below|shoulder|side)|(?:printed|stamped|embossed)\s*on\s*(?:neck|cap|crown|bottom))|"
-    r"(?:see\s*(?:neck|cap|crown|bottom|below)\s*for\s*(?:mrp|mfd|batch|usp|date))", re.I)
+    r"(?:for\s+)?(?:mfd|mrp|batch|b\.?\s*no|use\s*by|usp|expiry|lot|pkd|date).*(?:see\s*(?:base|bottom|neck|cap|crown|below|shoulder|side|can\s*bottom)|(?:printed|stamped|embossed)\s*on\s*(?:base|bottom|neck|cap|crown)|at\s*(?:base|bottom))|"
+    r"(?:see\s*(?:base|bottom|neck|cap|crown|below|can\s*bottom)\s*for\s*(?:mrp|mfd|batch|b\.?\s*no|usp|date))|"
+    r"(?:see\s*(?:base|bottom|neck|cap|crown|below))|"
+    r"\b(?:best\s*served\s*chilled)\b", re.I)
 
 PIN = re.compile(r"\b[1-9]\d{5}\b")
 
@@ -126,9 +131,12 @@ def extract(lines: list) -> dict:
             f = {"value": None, "line": idx, "bbox": list(L["bbox"]), "conf": round(L["conf"], 1), "raw": text}
 
             if name == "net_quantity":
-                f["value"] = f"{m.group(2)} {m.group(3)}"
+                u = re.sub(r"[\s.]", "", m.group(3)).lower()
+                if u in ("mi", "mt", "m1", "m|"):
+                    u = "ml"
+                f["value"] = f"{m.group(2)} {u}"
                 f["numeral"] = m.group(2)
-                f["unit"] = re.sub(r"[\s.]", "", m.group(3)).lower()
+                f["unit"] = u
                 f["qualifier"] = bool(re.search(r"approx|about|minimum|min\.|not\s+less|लगभग|न्यूनतम", text, re.I))
             elif name == "mrp":
                 f["value"] = "₹" + m.group(2)
@@ -189,9 +197,11 @@ def extract(lines: list) -> dict:
             text = L["text"]
             m = STANDALONE_QTY.search(text)
             if m:
-                val = f"{m.group(1)} {m.group(2)}"
-                num = m.group(1)
                 u = re.sub(r"[\s.]", "", m.group(2)).lower()
+                if u in ("mi", "mt", "m1", "m|"):
+                    u = "ml"
+                num = m.group(1)
+                val = f"{num} {u}"
                 target = num.replace(",", ".")
                 hits = [w for w in L["words"] if target in w["t"].replace(",", ".")]
                 fields["net_quantity"] = {
@@ -201,21 +211,23 @@ def extract(lines: list) -> dict:
                 }
                 break
 
-    # If bottle declares "See Neck / See Cap" for lot-specific info, populate missing fields with statutory cross-reference
+    # If bottle/can declares "See Neck / See Base / See Bottom" for lot-specific info, populate missing fields with statutory cross-reference
     if neck_decl:
         nd_raw = neck_decl["raw"]
-        ref_val = "Declared on neck/cap ('See Neck' per Rule 6(1) proviso)"
+        is_base = bool(re.search(r"base|bottom|chill|can", nd_raw, re.I))
+        ref_val = "Declared on base ('See Base' per Rule 6(1) proviso)" if is_base else "Declared on neck/cap ('See Neck' per Rule 6(1) proviso)"
         for target, kwords in [
-            ("mrp", ["mrp", "price", "retail"]),
-            ("mfg_date", ["mfd", "mfg", "date", "pkd"]),
-            ("expiry", ["use by", "expiry", "best before", "exp"]),
-            ("batch_number", ["batch", "lot", "b.no"]),
-            ("unit_sale_price", ["usp", "unit sale price"]),
+            ("mrp", ["mrp", "price", "retail", "base", "bottom", "chill"]),
+            ("mfg_date", ["mfd", "mfg", "date", "pkd", "base", "bottom", "chill"]),
+            ("expiry", ["use by", "expiry", "best before", "exp", "base", "bottom", "chill"]),
+            ("batch_number", ["batch", "lot", "b.no", "base", "bottom", "chill"]),
+            ("unit_sale_price", ["usp", "unit sale price", "base", "bottom", "chill"]),
         ]:
-            if target not in fields and any(kw in nd_raw.lower() for kw in kwords):
+            if target not in fields and (any(kw in nd_raw.lower() for kw in kwords) or is_base):
                 fields[target] = {
                     "value": ref_val,
                     "on_neck": True,
+                    "on_base": is_base,
                     "conf": neck_decl["conf"],
                     "line": neck_decl["line"],
                     "bbox": neck_decl["bbox"],
