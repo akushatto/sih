@@ -5,3 +5,4 @@ __pycache__/
 backend/evidence/
 backend/*.db
 .DS_Store
+.vercel
