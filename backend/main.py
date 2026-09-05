@@ -91,7 +91,8 @@ async def scan(file: UploadFile = File(...), mode: str = "live", save: bool = Fa
     qr_text = " ".join(q["data"] for q in qr_codes if q.get("data"))
     full_text = " ".join(l["text"] for l in lines) + (" " + qr_text if qr_text else "")
     scale = estimate_scale(img, pack_width_mm or DEFAULT_WIDTH_MM.get(category, 150), pack_height_mm, assumed=pack_width_mm is None)
-    checks = evaluate(fields, scale, category, full_text=full_text)
+    pname = product_name or _guess_name(lines, H)
+    checks = evaluate(fields, scale, category, full_text=full_text, product_name=pname)
 
     annotated_b64 = buf = None
     if mode != "live" or save:
